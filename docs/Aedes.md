@@ -333,6 +333,16 @@ Invoked when server receives a valid [`CONNECT`][CONNECT] packet. The packet can
 
 Any `error` will be raised in `connectionError` event.
 
+> __MQTT 5.0 server redirect:__ to redirect a v5 client to another server, reject the connection with an `error` carrying a `serverReference` (and optionally a `reasonCode`). The rejection CONNACK then carries reason code `0x9C` (Use another server; or `0x9D` Server moved when `error.reasonCode` is set to it) and the `serverReference` property. The same works from [`authenticate`](#handler-authenticate-client-username-password-callback), and mid-session via [`client.disconnect`](./Client.md#clientdisconnect-opts-callback). §4.11
+>
+> ```js
+> aedes.preConnect = function (client, packet, callback) {
+>   const err = new Error('use another server')
+>   err.serverReference = 'other-host.example:1883'
+>   callback(err, false)
+> }
+> ```
+
 Some Use Cases:
 
 1. Rate Limit / Throttle by `client.conn.remoteAddress`
