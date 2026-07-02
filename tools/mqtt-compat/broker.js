@@ -25,15 +25,20 @@ const broker = await Aedes.createBroker({
 })
 
 // The Paho `test_subscribe_failure` (v3.1.1 and v5) subscribes to a topic that is
-// "not allowed to be subscribed to" and asserts the broker answers with SUBACK
-// reason code 0x80. That is a broker-configuration feature, not a default: aedes
-// supports it via authorizeSubscribe (return a null subscription -> granted 0x80),
-// and the Paho reference broker ships with exactly this rule. Mirror it here so
-// the test measures aedes's capability rather than the absence of a default ACL.
+// "not allowed to be subscribed to" and asserts the broker denies it. That is a
+// broker-configuration feature, not a default: aedes supports it via
+// authorizeSubscribe (return a null subscription -> a failure SUBACK), and the
+// Paho reference broker ships with exactly this rule. Mirror it here so the test
+// measures aedes's capability rather than the absence of a default ACL.
+//
+// NOTE: aedes returns SUBACK 0x80 for v3.1.1 but the more-specific 0x87 (Not
+// authorized) for v5 (#822, MQTT-5.0 §3.9.3). Paho's v5 test still hardcodes
+// `assert == 0x80`, so `test_subscribe_failure` is an EXPECTED_GAP for v5 in
+// run_compat.py — a Paho-side staleness, not an aedes gap.
 const NO_SUBSCRIBE_TOPIC = 'test/nosubscribe'
 broker.authorizeSubscribe = function (client, sub, callback) {
   if (sub.topic === NO_SUBSCRIBE_TOPIC) {
-    callback(null, null) // deny -> SUBACK 0x80
+    callback(null, null) // deny -> failure SUBACK (0x80 for v3.1.1, 0x87 for v5)
     return
   }
   callback(null, sub)
