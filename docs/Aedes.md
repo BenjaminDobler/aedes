@@ -399,7 +399,7 @@ Invoked when
 
 If invoked `callback` with no errors, server authorizes the packet otherwise emits `clientError` with `error`. If an `error` occurs the client connection will be closed, but no error is returned to the client (MQTT-3.3.5-2)
 
-> __MQTT 5.0:__ the connection is __not__ closed on an authorization failure. A QoS 1/2 publish is answered with a `0x87` (Not authorized) PUBACK/PUBREC and a QoS 0 publish is dropped silently — either way the connection stays up. The `error.message` is sent back as the ACK's __Reason String__, unless the client connected with `Request Problem Information = false` (then it is suppressed, per [MQTT-3.1.2-29]).
+> __MQTT 5.0:__ the connection is __not__ closed on an authorization failure. A QoS 1/2 publish is answered with a `0x87` (Not authorized) PUBACK/PUBREC and a QoS 0 publish is dropped silently — either way the connection stays up. The `error.message` is sent back to the client as the ACK's __Reason String__ (unless the client connected with `Request Problem Information = false`, when it is suppressed, per [MQTT-3.1.2-29]). Because it is client-visible, keep the message generic — do not put internal detail (paths, user ids, backend errors) in it.
 
 ```js
 aedes.authorizePublish = function (client, packet, callback) {

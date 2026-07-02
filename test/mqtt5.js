@@ -651,6 +651,42 @@ test('MQTT 5.0 a denied SUBSCRIBE returns SUBACK reason code 0x87 (not the coars
   t.assert.deepEqual(granted, [0x87], 'denied subscription → 0x87 Not authorized')
 })
 
+test('MQTT 5.0 a rejecting PUBREC (reason >= 0x80) ends QoS 2 without a PUBREL', async (t) => {
+  t.plan(1)
+  const { port, connect } = await createServerAndConnect(t)
+
+  // Raw v5 subscriber so we control the QoS 2 handshake and can reject the
+  // delivered PUBLISH with a >= 0x80 PUBREC. [MQTT 5.0 §4.3.3]
+  let pubrelSeen = false
+  let subacked
+  const subReady = new Promise(resolve => { subacked = resolve })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  parser.on('packet', (p) => {
+    if (p.cmd === 'connack') {
+      raw.write(generate({ cmd: 'subscribe', messageId: 1, subscriptions: [{ topic: 'q2/reject', qos: 2 }] }, { protocolVersion: 5 }))
+    } else if (p.cmd === 'suback') {
+      subacked()
+    } else if (p.cmd === 'publish') {
+      raw.write(generate({ cmd: 'pubrec', messageId: p.messageId, reasonCode: 0x87 }, { protocolVersion: 5 }))
+    } else if (p.cmd === 'pubrel') {
+      pubrelSeen = true
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({ cmd: 'connect', protocolVersion: 5, clientId: 'q2-reject', clean: true, keepalive: 0 }, { protocolVersion: 5 }))
+  await subReady
+
+  const pub = connect({ clientId: 'q2-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('q2/reject', 'x', { qos: 2 })
+  // Negative assertion: wait a window for a (wrongly sent) PUBREL that must not come.
+  await delay(150)
+  t.assert.equal(pubrelSeen, false, 'no PUBREL after a rejecting PUBREC')
+})
+
 test('MQTT 5.0 returns an Assigned Client Identifier for an empty clientId', async (t) => {
   t.plan(2)
   const { broker, connect } = await createServerAndConnect(t)
