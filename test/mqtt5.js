@@ -818,12 +818,13 @@ test('MQTT 5.0 authenticate can redirect with a custom reason code (0x9D Server 
 test('MQTT 5.0 server-initiated DISCONNECT can carry a Server Reference', async (t) => {
   t.plan(2)
   const { broker, connect } = await createServerAndConnect(t)
+  // Await clientReady for the broker-side client (emitted after connected=true),
+  // rather than polling broker.clients.
+  const ready = once(broker, 'clientReady')
   const client = connect({ clientId: 'redir-disc', reconnectPeriod: 0 })
-  await once(client, 'connect')
+  const [bclient] = await ready
   const disc = once(client, 'disconnect')
-  // Poll for broker-side connected (set after the CONNACK is written).
-  while (!broker.clients['redir-disc']?.connected) await delay(5)
-  broker.clients['redir-disc'].disconnect({
+  bclient.disconnect({
     reasonCode: 0x9C,
     properties: { serverReference: 'elsewhere:1883' }
   })
