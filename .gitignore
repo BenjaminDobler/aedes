@@ -57,3 +57,7 @@ out.tap
 
 # aedes examples
 shared-mqemitter
+
+# Python bytecode cache (mqtt-compat tooling)
+__pycache__/
+*.pyc

@@ -745,6 +745,36 @@ test('MQTT 5.0 Response Information can be a per-client function', async (t) => 
   t.assert.equal(connack.properties?.responseInformation, 'resp/ri-fn', 'per-client value returned')
 })
 
+test('MQTT 5.0 Response Information is omitted when requested but the broker is not configured', async (t) => {
+  t.plan(1)
+  // Default (responseInformation: null): the "configured" half of the gate.
+  const { connect } = await createServerAndConnect(t)
+  const client = connect({ clientId: 'ri-none', properties: { requestResponseInformation: true } })
+  const [connack] = await once(client, 'connect')
+  t.assert.equal(connack.properties?.responseInformation, undefined, 'omitted when not configured')
+})
+
+test('MQTT 5.0 a Response Information function returning undefined (or throwing) omits the property', async (t) => {
+  t.plan(2)
+  const { connect } = await createServerAndConnect(t, {
+    brokerOptions: {
+      responseInformation: (client) => {
+        // Opt out for one client; throw for another — both must degrade to omit,
+        // never break the CONNACK.
+        if (client.id === 'ri-throw') throw new Error('tenant lookup failed')
+        return undefined
+      }
+    }
+  })
+  const a = connect({ clientId: 'ri-undef', properties: { requestResponseInformation: true } })
+  const [ca] = await once(a, 'connect')
+  t.assert.equal(ca.properties?.responseInformation, undefined, 'undefined return → omitted')
+
+  const b = connect({ clientId: 'ri-throw', properties: { requestResponseInformation: true } })
+  const [cb] = await once(b, 'connect')
+  t.assert.equal(cb.properties?.responseInformation, undefined, 'a throwing resolver → omitted, handshake intact')
+})
+
 test('MQTT 5.0 imposes Server Keep Alive when the client exceeds the broker limit', async (t) => {
   t.plan(1)
   const { connect } = await createServerAndConnect(t, {
