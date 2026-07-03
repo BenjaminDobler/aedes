@@ -599,6 +599,114 @@ test('MQTT 5.0 unauthorized QoS2 publish is answered with 0x87 (PUBREC), not a d
   t.assert.ok(acks.some(a => a.reasonCode === 0x87), 'PUBREC carried 0x87 Not authorized')
 })
 
+test('MQTT 5.0 unauthorized publish PUBACK carries a Reason String, honoring Request Problem Information', async (t) => {
+  t.plan(3)
+  const { connect } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authorizePublish: (client, packet, cb) => {
+        cb(packet.topic.startsWith('denied') ? new Error('not allowed here') : null)
+      }
+    }
+  })
+
+  // Default Request Problem Information (1): the 0x87 PUBACK carries the broker's
+  // error as a Reason String (#823).
+  const pub = connect({ clientId: 'rpi-on', reconnectPeriod: 0 })
+  await once(pub, 'connect')
+  const acks = []
+  pub.on('packetreceive', (p) => { if (p.cmd === 'puback') acks.push(p) })
+  try { await pub.publishAsync('denied/x', 'd', { qos: 1 }) } catch { /* 0x87 */ }
+  while (acks.length === 0) await delay(5)
+  t.assert.equal(acks[0].reasonCode, 0x87, '0x87 Not authorized')
+  t.assert.equal(acks[0].properties?.reasonString, 'not allowed here', 'Reason String present')
+
+  // Request Problem Information = false [MQTT-3.1.2-29]: still 0x87, but no Reason String.
+  const pub2 = connect({ clientId: 'rpi-off', reconnectPeriod: 0, properties: { requestProblemInformation: false } })
+  await once(pub2, 'connect')
+  const acks2 = []
+  pub2.on('packetreceive', (p) => { if (p.cmd === 'puback') acks2.push(p) })
+  try { await pub2.publishAsync('denied/y', 'd', { qos: 1 }) } catch { /* 0x87 */ }
+  while (acks2.length === 0) await delay(5)
+  t.assert.equal(acks2[0].properties?.reasonString, undefined, 'Reason String suppressed when RPI=0')
+})
+
+test('MQTT 5.0 a denied SUBSCRIBE returns SUBACK reason code 0x87 (not the coarse 0x80)', async (t) => {
+  t.plan(1)
+  const { connect } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authorizeSubscribe: (client, sub, cb) => cb(null, sub.topic === 'denied' ? null : sub)
+    }
+  })
+  const client = connect({ clientId: 'sub-denied', reconnectPeriod: 0 })
+  await once(client, 'connect')
+
+  // mqtt.js rejects subscribeAsync when a granted code is >= 0x80; read it off the
+  // SUBACK packet either way.
+  let granted
+  try {
+    granted = (await client.subscribeAsync('denied')).map(g => g.qos)
+  } catch (err) {
+    granted = err.packet?.granted
+  }
+  t.assert.deepEqual(granted, [0x87], 'denied subscription → 0x87 Not authorized')
+})
+
+test('MQTT 5.0 a rejecting PUBREC (reason >= 0x80) ends QoS 2 without a PUBREL', async (t) => {
+  // Covers both the clean path and the non-clean path (which releases the stored
+  // outgoing packet id rather than sending a PUBREL). [MQTT 5.0 §4.3.3]
+  t.plan(3)
+  const { port, connect, broker } = await createServerAndConnect(t)
+
+  // Raw v5 subscriber so we control the QoS 2 handshake and can reject the
+  // delivered PUBLISH with a >= 0x80 PUBREC.
+  async function rejectAndAssert (clientId, connectProps, checkRelease) {
+    let pubrelSeen = false
+    let subacked
+    const subReady = new Promise(resolve => { subacked = resolve })
+    const raw = createConnection(port, 'localhost')
+    t.after(() => raw.destroy())
+    raw.on('error', () => {})
+    const parser = createParser({ protocolVersion: 5 })
+    parser.on('packet', (p) => {
+      if (p.cmd === 'connack') {
+        raw.write(generate({ cmd: 'subscribe', messageId: 1, subscriptions: [{ topic: 'q2/reject', qos: 2 }] }, { protocolVersion: 5 }))
+      } else if (p.cmd === 'suback') {
+        subacked()
+      } else if (p.cmd === 'publish') {
+        raw.write(generate({ cmd: 'pubrec', messageId: p.messageId, reasonCode: 0x87 }, { protocolVersion: 5 }))
+      } else if (p.cmd === 'pubrel') {
+        pubrelSeen = true
+      }
+    })
+    raw.on('data', d => parser.parse(d))
+    raw.write(generate({ cmd: 'connect', protocolVersion: 5, clientId, keepalive: 0, ...connectProps }, { protocolVersion: 5 }))
+    await subReady
+
+    const pub = connect({ clientId: clientId + '-pub' })
+    await once(pub, 'connect')
+    await pub.publishAsync('q2/reject', 'x', { qos: 2 })
+    // Negative assertion: wait a window for a (wrongly sent) PUBREL that must not come.
+    await delay(150)
+    t.assert.equal(pubrelSeen, false, `no PUBREL after a rejecting PUBREC (${clientId})`)
+
+    // Non-clean path: the QoS 2 PUBLISH was persisted as outgoing state when it
+    // was delivered; handlePubrec must release that packet id instead of leaving
+    // it to be redelivered on reconnect. Assert the stored outgoing queue is now
+    // empty — this is the half of the behaviour a "no PUBREL" check alone misses.
+    if (checkRelease) {
+      const outgoing = []
+      for await (const stored of broker.persistence.outgoingStream({ id: clientId })) outgoing.push(stored)
+      t.assert.equal(outgoing.length, 0, `stored outgoing packet id released after rejecting PUBREC (${clientId})`)
+    }
+    raw.destroy()
+  }
+
+  // Clean session: no persisted outgoing state to release.
+  await rejectAndAssert('q2-reject-clean', { clean: true })
+  // Non-clean session: the stored outgoing packet id is released instead.
+  await rejectAndAssert('q2-reject-persist', { clean: false, properties: { sessionExpiryInterval: 60 } }, true)
+})
+
 test('MQTT 5.0 returns an Assigned Client Identifier for an empty clientId', async (t) => {
   t.plan(2)
   const { broker, connect } = await createServerAndConnect(t)
