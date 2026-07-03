@@ -654,12 +654,12 @@ test('MQTT 5.0 a denied SUBSCRIBE returns SUBACK reason code 0x87 (not the coars
 test('MQTT 5.0 a rejecting PUBREC (reason >= 0x80) ends QoS 2 without a PUBREL', async (t) => {
   // Covers both the clean path and the non-clean path (which releases the stored
   // outgoing packet id rather than sending a PUBREL). [MQTT 5.0 §4.3.3]
-  t.plan(2)
-  const { port, connect } = await createServerAndConnect(t)
+  t.plan(3)
+  const { port, connect, broker } = await createServerAndConnect(t)
 
   // Raw v5 subscriber so we control the QoS 2 handshake and can reject the
   // delivered PUBLISH with a >= 0x80 PUBREC.
-  async function rejectAndAssert (clientId, connectProps) {
+  async function rejectAndAssert (clientId, connectProps, checkRelease) {
     let pubrelSeen = false
     let subacked
     const subReady = new Promise(resolve => { subacked = resolve })
@@ -688,13 +688,23 @@ test('MQTT 5.0 a rejecting PUBREC (reason >= 0x80) ends QoS 2 without a PUBREL',
     // Negative assertion: wait a window for a (wrongly sent) PUBREL that must not come.
     await delay(150)
     t.assert.equal(pubrelSeen, false, `no PUBREL after a rejecting PUBREC (${clientId})`)
+
+    // Non-clean path: the QoS 2 PUBLISH was persisted as outgoing state when it
+    // was delivered; handlePubrec must release that packet id instead of leaving
+    // it to be redelivered on reconnect. Assert the stored outgoing queue is now
+    // empty — this is the half of the behaviour a "no PUBREL" check alone misses.
+    if (checkRelease) {
+      const outgoing = []
+      for await (const stored of broker.persistence.outgoingStream({ id: clientId })) outgoing.push(stored)
+      t.assert.equal(outgoing.length, 0, `stored outgoing packet id released after rejecting PUBREC (${clientId})`)
+    }
     raw.destroy()
   }
 
   // Clean session: no persisted outgoing state to release.
   await rejectAndAssert('q2-reject-clean', { clean: true })
   // Non-clean session: the stored outgoing packet id is released instead.
-  await rejectAndAssert('q2-reject-persist', { clean: false, properties: { sessionExpiryInterval: 60 } })
+  await rejectAndAssert('q2-reject-persist', { clean: false, properties: { sessionExpiryInterval: 60 } }, true)
 })
 
 test('MQTT 5.0 returns an Assigned Client Identifier for an empty clientId', async (t) => {
