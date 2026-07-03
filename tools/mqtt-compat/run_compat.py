@@ -55,11 +55,12 @@ EXPECTED_GAPS = {
         "test_subscribe_identifiers":
             "a delivery matching multiple overlapping subscriptions echoes only one "
             "Subscription Identifier (#828 [MQTT-3.3.4-4] — deferred per #821)",
-        "test_subscribe_failure":
-            "Paho hardcodes assert SUBACK == 0x80 (written for 3.1.1); aedes "
-            "correctly returns the more-specific 0x87 (Not authorized) for a denied "
-            "v5 SUBSCRIBE per MQTT-5.0 §3.9.3 — a conformance improvement, not an "
-            "aedes gap (#822)",
+        # NOTE: test_subscribe_failure is NOT a gap. Aedes returns the correct v5
+        # SUBACK 0x87 (Not authorized); it only failed because Paho's bundled v5
+        # codec rejects any SUBACK reason code outside [0,1,2,0x80] and its test
+        # copied the 3.1.1 `assert == 0x80`. Both are fixed by
+        # tools/mqtt-compat/patches/paho-v5-suback-failure-reason-codes.patch,
+        # applied to the pinned checkout before the suite runs, so the test passes.
     },
     "v3": {},
 }

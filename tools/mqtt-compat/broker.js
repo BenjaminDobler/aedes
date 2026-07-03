@@ -32,9 +32,11 @@ const broker = await Aedes.createBroker({
 // measures aedes's capability rather than the absence of a default ACL.
 //
 // NOTE: aedes returns SUBACK 0x80 for v3.1.1 but the more-specific 0x87 (Not
-// authorized) for v5 (#822, MQTT-5.0 §3.9.3). Paho's v5 test still hardcodes
-// `assert == 0x80`, so `test_subscribe_failure` is an EXPECTED_GAP for v5 in
-// run_compat.py — a Paho-side staleness, not an aedes gap.
+// authorized) for v5 (#822, MQTT-5.0 §3.9.3). Paho's bundled v5 codec rejects
+// SUBACK reason codes outside [0,1,2,0x80] and its v5 test hardcodes
+// `assert == 0x80` (both copied from the 3.1.1 suite), so the pinned checkout is
+// patched to accept 0x87 too — see
+// tools/mqtt-compat/patches/paho-v5-suback-failure-reason-codes.patch.
 const NO_SUBSCRIBE_TOPIC = 'test/nosubscribe'
 broker.authorizeSubscribe = function (client, sub, callback) {
   if (sub.topic === NO_SUBSCRIBE_TOPIC) {
