@@ -21,6 +21,7 @@
   - [client.subscribe (subscriptions, [callback])](#clientsubscribe-subscriptions-callback)
   - [client.unsubscribe (unsubscriptions, [callback])](#clientunsubscribe-unsubscriptions-callback)
   - [client.close ([callback])](#clientclose-callback)
+  - [client.disconnect ([opts], [callback])](#clientdisconnect-opts-callback)
   - [client.emptyOutgoingQueue ([callback])](#clientemptyoutgoingqueue-callback)
 
 ## new Client(aedes, stream, request)
@@ -176,6 +177,15 @@ Unsubscribe client to the list of topics.
 Disconnect client
 
 `callback` will be invoked when client is closed.
+
+## client.disconnect ([opts], [callback])
+
+- opts: `<object>`
+  - reasonCode: `<number>` MQTT 5.0 disconnect reason code (e.g. `0x8B` server shutting down, `0x9C` use another server, `0x9D` server moved). Default `0`.
+  - properties: `<object>` MQTT 5.0 `DISCONNECT` properties (e.g. `reasonString`, `serverReference`, `userProperties`).
+- callback: `<Function>` invoked once the client is closed.
+
+MQTT 5.0 only: gracefully disconnect a client by sending a `DISCONNECT` packet with the given reason code and properties before closing the connection. For v3/v4 clients (which have no server-side `DISCONNECT`) this just closes the connection. Use `properties.serverReference` with reason code `0x9C`/`0x9D` to redirect a client to another server mid-session.
 
 ## client.emptyOutgoingQueue ([callback])
 
