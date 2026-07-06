@@ -141,6 +141,69 @@ test('MQTT 5.0 inbound topic alias is resolved and delivered with the real topic
   t.assert.equal(payload2.toString(), 'two')
 })
 
+test('MQTT 5.0 outbound Topic Alias: the broker aliases repeated topics to a v5 client', async (t) => {
+  t.plan(5)
+  const { connect } = await createServerAndConnect(t)
+  // The subscriber advertises a Topic Alias Maximum, so the broker may alias.
+  const sub = connect({ clientId: 'oalias-sub', properties: { topicAliasMaximum: 5 } })
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  await sub.subscribeAsync('o/alias', { qos: 0 })
+
+  const pub = connect({ clientId: 'oalias-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('o/alias', 'one')
+  while (publishes.length < 1) await delay(5)
+  await pub.publishAsync('o/alias', 'two')
+  while (publishes.length < 2) await delay(5)
+
+  // First delivery: full topic + a topic alias that registers the mapping.
+  t.assert.equal(publishes[0].topic, 'o/alias', 'first PUBLISH carries the full topic')
+  const alias = publishes[0].properties?.topicAlias
+  t.assert.ok(alias >= 1, 'first PUBLISH assigns a topic alias')
+  // Second delivery on the same topic: empty topic + the same alias.
+  t.assert.equal(publishes[1].topic, '', 'second PUBLISH omits the topic')
+  t.assert.equal(publishes[1].properties?.topicAlias, alias, 'second PUBLISH reuses the alias')
+  t.assert.equal(publishes[1].payload.toString(), 'two', 'payload still delivered')
+})
+
+test('MQTT 5.0 outbound Topic Alias: not used when the client did not advertise one', async (t) => {
+  t.plan(2)
+  const { connect } = await createServerAndConnect(t)
+  const sub = connect({ clientId: 'oalias-off' }) // no topicAliasMaximum ⇒ 0
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  await sub.subscribeAsync('o/noalias', { qos: 0 })
+  const pub = connect({ clientId: 'oalias-off-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('o/noalias', 'one')
+  await pub.publishAsync('o/noalias', 'two')
+  while (publishes.length < 2) await delay(5)
+  t.assert.equal(publishes[1].topic, 'o/noalias', 'full topic kept (no aliasing)')
+  t.assert.equal(publishes[1].properties?.topicAlias, undefined, 'no topic alias assigned')
+})
+
+test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full topic', async (t) => {
+  t.plan(3)
+  const { connect } = await createServerAndConnect(t)
+  const sub = connect({ clientId: 'oalias-full', properties: { topicAliasMaximum: 1 } })
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  await sub.subscribeAsync('o/#', { qos: 0 })
+  const pub = connect({ clientId: 'oalias-full-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('o/a', '1')
+  while (publishes.length < 1) await delay(5)
+  await pub.publishAsync('o/b', '2') // distinct topic, but the single alias slot is taken
+  while (publishes.length < 2) await delay(5)
+  t.assert.equal(publishes[0].properties?.topicAlias, 1, 'first topic gets alias 1')
+  t.assert.equal(publishes[1].topic, 'o/b', 'second topic sent with its full name (table full)')
+  t.assert.equal(publishes[1].properties?.topicAlias, undefined, 'no alias assigned once the table is full')
+})
+
 test('MQTT 5.0 subscription identifier is echoed on matching publishes', async (t) => {
   t.plan(1)
   const { connect } = await createServerAndConnect(t)
