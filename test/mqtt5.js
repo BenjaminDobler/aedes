@@ -782,9 +782,12 @@ test('MQTT 5.0 a Response Information function returning undefined (or throwing)
 })
 
 test('MQTT 5.0 preConnect can redirect a client with CONNACK 0x9C + Server Reference', async (t) => {
-  t.plan(3)
+  t.plan(4)
   const { connect } = await createServerAndConnect(t, {
+    // Advertise capabilities so we can prove the redirect CONNACK omits them.
     brokerOptions: {
+      topicAliasMaximum: 10,
+      receiveMaximum: 20,
       preConnect: (client, packet, cb) => {
         // #838: attach a serverReference to the rejection to redirect the client.
         cb(Object.assign(new Error('go elsewhere'), { serverReference: 'other-host:1883' }), false)
@@ -799,6 +802,9 @@ test('MQTT 5.0 preConnect can redirect a client with CONNACK 0x9C + Server Refer
   const [connack] = await once(client, 'packetreceive')
   t.assert.equal(connack.reasonCode, 0x9C, '0x9C Use another server')
   t.assert.equal(connack.properties?.serverReference, 'other-host:1883', 'server reference on the wire')
+  // A rejection CONNACK carries only the reason/serverReference, never the
+  // broker-capability advertisement (doConnack skips it once reasonCode is set).
+  t.assert.equal(connack.properties?.receiveMaximum, undefined, 'no broker-capability properties on a redirect CONNACK')
   await closed
   t.assert.equal(client.connected, false, 'connection closed after the redirect CONNACK')
 })
@@ -840,7 +846,7 @@ test('MQTT 5.0 redirect: a non-v5 client carrying serverReference is not redirec
 })
 
 test('MQTT 5.0 authenticate can redirect with a custom reason code (0x9D Server moved)', async (t) => {
-  t.plan(2)
+  t.plan(3)
   const { connect } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticate: (client, username, password, cb) => {
@@ -850,9 +856,14 @@ test('MQTT 5.0 authenticate can redirect with a custom reason code (0x9D Server 
   })
   const client = connect({ clientId: 'redir-auth', reconnectPeriod: 0 })
   client.on('error', () => {})
+  const closed = new Promise(resolve => client.once('close', resolve))
   const [connack] = await once(client, 'packetreceive')
   t.assert.equal(connack.reasonCode, 0x9D, '0x9D Server moved (custom reason code)')
   t.assert.equal(connack.properties?.serverReference, 'new-host:1883', 'server reference on the wire')
+  // [MQTT-3.2.2-7] a >= 0x80 CONNACK must close the connection (this path closes
+  // via client.close.bind, distinct from the preConnect done(err) path).
+  await closed
+  t.assert.equal(client.connected, false, 'connection closed after the redirect CONNACK')
 })
 
 test('MQTT 5.0 server-initiated DISCONNECT can carry a Server Reference', async (t) => {
