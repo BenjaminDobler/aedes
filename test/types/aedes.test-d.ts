@@ -25,6 +25,7 @@ const broker = new Aedes({
   receiveMaximum: 20,
   sessionExpiryIntervalLimit: 86400,
   pendingSessionsLimit: 10000,
+  responseInformation: (client: Client) => 'resp/' + client.id,
   preConnect: (client: Client, packet: ConnectPacket, callback) => {
     if (client.req) {
       callback(new Error('not websocket stream'), false)
@@ -105,6 +106,11 @@ const broker = new Aedes({
 })
 
 expectType<Aedes>(broker)
+
+// responseInformation accepts a static string and the null disable sentinel too,
+// not just the (client) => string function arm exercised above.
+expectType<Aedes>(new Aedes({ responseInformation: 'resp/base' }))
+expectType<Aedes>(new Aedes({ responseInformation: null }))
 
 expectType<Readonly<Brokers>>(broker.brokers)
 

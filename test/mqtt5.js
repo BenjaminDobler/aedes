@@ -719,6 +719,68 @@ test('MQTT 5.0 returns an Assigned Client Identifier for an empty clientId', asy
   t.assert.ok(broker.clients[assigned], 'client registered under the assigned id')
 })
 
+test('MQTT 5.0 returns Response Information when requested and configured', async (t) => {
+  t.plan(2)
+  const { connect } = await createServerAndConnect(t, {
+    brokerOptions: { responseInformation: 'resp/base' }
+  })
+  // Requested (requestResponseInformation) → the broker returns it.
+  const a = connect({ clientId: 'ri-on', properties: { requestResponseInformation: true } })
+  const [ca] = await once(a, 'connect')
+  t.assert.equal(ca.properties?.responseInformation, 'resp/base', 'returned when requested')
+
+  // Not requested → omitted, even though the broker is configured.
+  const b = connect({ clientId: 'ri-off' })
+  const [cb] = await once(b, 'connect')
+  t.assert.equal(cb.properties?.responseInformation, undefined, 'omitted when not requested')
+})
+
+test('MQTT 5.0 Response Information can be a per-client function', async (t) => {
+  t.plan(1)
+  const { connect } = await createServerAndConnect(t, {
+    brokerOptions: { responseInformation: (client) => `resp/${client.id}` }
+  })
+  const client = connect({ clientId: 'ri-fn', properties: { requestResponseInformation: true } })
+  const [connack] = await once(client, 'connect')
+  t.assert.equal(connack.properties?.responseInformation, 'resp/ri-fn', 'per-client value returned')
+})
+
+test('MQTT 5.0 Response Information is omitted when requested but the broker is not configured', async (t) => {
+  t.plan(1)
+  // Default (responseInformation: null): the "configured" half of the gate.
+  const { connect } = await createServerAndConnect(t)
+  const client = connect({ clientId: 'ri-none', properties: { requestResponseInformation: true } })
+  const [connack] = await once(client, 'connect')
+  t.assert.equal(connack.properties?.responseInformation, undefined, 'omitted when not configured')
+})
+
+test('MQTT 5.0 a Response Information function returning undefined (or throwing) omits the property', async (t) => {
+  t.plan(4)
+  const { broker, connect } = await createServerAndConnect(t, {
+    brokerOptions: {
+      responseInformation: (client) => {
+        // Opt out for one client; throw for another — both must degrade to omit,
+        // never break the CONNACK.
+        if (client.id === 'ri-throw') throw new Error('tenant lookup failed')
+        return undefined
+      }
+    }
+  })
+  const a = connect({ clientId: 'ri-undef', properties: { requestResponseInformation: true } })
+  const [ca] = await once(a, 'connect')
+  t.assert.equal(ca.properties?.responseInformation, undefined, 'undefined return → omitted')
+
+  // A throwing resolver still completes the handshake (property omitted) and the
+  // failure is surfaced on clientError rather than swallowed silently.
+  const clientError = once(broker, 'clientError')
+  const b = connect({ clientId: 'ri-throw', properties: { requestResponseInformation: true } })
+  const [cb] = await once(b, 'connect')
+  t.assert.equal(cb.properties?.responseInformation, undefined, 'a throwing resolver → omitted, handshake intact')
+  const [errClient, err] = await clientError
+  t.assert.equal(errClient.id, 'ri-throw', 'clientError carries the affected client')
+  t.assert.equal(err.message, 'tenant lookup failed', 'clientError carries the resolver error')
+})
+
 test('MQTT 5.0 imposes Server Keep Alive when the client exceeds the broker limit', async (t) => {
   t.plan(1)
   const { connect } = await createServerAndConnect(t, {
