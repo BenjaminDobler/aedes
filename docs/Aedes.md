@@ -468,7 +468,7 @@ aedes.authorizeSubscribe = function (client, sub, callback) {
 }
 ```
 
-To negate a subscription, set the subscription to `null`. Aedes ignores the negated subscription and the `qos` in `SubAck` is set to `128` (MQTT 3.1.1) based on [MQTT 3.11 spec](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html#_Toc385349323). For an __MQTT 5.0__ client the SUBACK reason code is the more specific `0x87` (Not authorized) instead of the coarse `0x80`:
+To negate a subscription, set the subscription to `null`. Aedes ignores the negated subscription and the `qos` in `SubAck` is set to `128` (MQTT 3.1.1) based on [MQTT 3.11 spec](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html#_Toc385349323). For an __MQTT 5.0__ client the SUBACK reason code is the more specific `0x87` (Not authorized) instead of the coarse `0x80`, and the SUBACK carries a broker-generated Reason String (e.g. `not authorized to subscribe`), gated by Request Problem Information:
 
 ```js
 aedes.authorizeSubscribe = function (client, sub, callback) {
