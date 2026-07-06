@@ -5,7 +5,7 @@ import Packet from 'aedes-packet'
 import memory from 'aedes-persistence'
 import mqemitter from 'mqemitter'
 import Client from './lib/client.js'
-import { $SYS_PREFIX, batch, noop, runSeries, armLongTimer } from './lib/utils.js'
+import { $SYS_PREFIX, batch, noop, runSeries, armLongTimer, topicLevelCount } from './lib/utils.js'
 import { SESSION_NEVER_EXPIRES, ReasonCodes } from './lib/constants.js'
 import pkg from './package.json' with { type: 'json' }
 
@@ -26,6 +26,7 @@ const defaultOptions = {
   queueLimit: 42,
   maxClientsIdLength: 23,
   keepaliveLimit: 0,
+  maxTopicLevels: 100,
   // MQTT 5.0: maximum Topic Alias value the broker accepts from a client.
   // 0 disables inbound topic aliases (the value advertised in CONNACK).
   topicAliasMaximum: 0,
@@ -53,6 +54,12 @@ const defaultOptions = {
 }
 const version = pkg.version
 
+// Hard ceiling for maxTopicLevels: the bundled mqemitter and aedes-persistence
+// build qlobber with its default max_words of 100 and aedes cannot raise it, so
+// a larger value would pass our guard yet still throw `too many words` in the
+// matcher. Clamp to [1, MAX_TOPIC_LEVELS] to keep the option safe.
+const MAX_TOPIC_LEVELS = 100
+
 // Sentinel stored in `expiringSessions` for a never-expiring (0xFFFFFFFF)
 // session: it has no real timer but must still occupy a slot against the
 // pending-sessions cap. `clear()` is a no-op so close()/clearSessionExpiry can
@@ -74,6 +81,8 @@ export class Aedes extends EventEmitter {
     this.connectTimeout = opts.connectTimeout
     this.keepaliveLimit = opts.keepaliveLimit
     this.maxClientsIdLength = opts.maxClientsIdLength
+    // clamp to a safe [1, 100] range; see MAX_TOPIC_LEVELS
+    this.maxTopicLevels = Math.min(Math.max(opts.maxTopicLevels, 1), MAX_TOPIC_LEVELS)
     this.topicAliasMaximum = opts.topicAliasMaximum
     this.maximumPacketSize = opts.maximumPacketSize
     this.receiveMaximum = opts.receiveMaximum
@@ -244,6 +253,14 @@ export class Aedes extends EventEmitter {
       done = client
       client = null
     }
+    // reject deeply nested topics before they reach qlobber (via mqemitter and
+    // the persistence trie), whose synchronous `too many words` throw would
+    // otherwise crash the broker. The protocol handlers validate the wire paths
+    // earlier; this also covers the will publish and direct programmatic use.
+    // See lib/utils.js#topicLevelCount.
+    if (topicLevelCount(packet.topic) > this.maxTopicLevels) {
+      return (done || noop)(new Error('topic has too many levels'))
+    }
     const p = new Packet(packet, this)
     // MQTT 5.0 Message Expiry Interval: record the absolute expiry so that a
     // message dropped into the offline queue can be discarded (or have its
@@ -259,10 +276,17 @@ export class Aedes extends EventEmitter {
   }
 
   subscribe (topic, func, done) {
+    // see publish(): guard against qlobber's synchronous `too many words` throw
+    if (topicLevelCount(topic) > this.maxTopicLevels) {
+      return (done || noop)(new Error('topic has too many levels'))
+    }
     this.mq.on(topic, func, done)
   }
 
   unsubscribe (topic, func, done) {
+    if (topicLevelCount(topic) > this.maxTopicLevels) {
+      return (done || noop)(new Error('topic has too many levels'))
+    }
     this.mq.removeListener(topic, func, done)
   }
 

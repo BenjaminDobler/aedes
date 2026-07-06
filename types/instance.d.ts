@@ -68,6 +68,11 @@ type PublishedHandler = (
   callback: (error?: Error | null) => void
 ) => void
 
+type DecodeProtocolHandler = (
+  client: Client,
+  buffer: Buffer
+) => any
+
 export interface AedesOptions {
   mq?: any;
   id?: string;
@@ -79,6 +84,10 @@ export interface AedesOptions {
   keepaliveLimit?: number;
   queueLimit?: number;
   maxClientsIdLength?: number;
+  maxTopicLevels?: number; // default: 100, clamped to [1, 100]
+  decodeProtocol?: DecodeProtocolHandler;
+  trustProxy?: boolean;
+  trustedProxies?: string[];
   // MQTT 5.0 broker limits, advertised in CONNACK.
   topicAliasMaximum?: number; // max inbound topic alias; 0 disables (default: 0)
   maximumPacketSize?: number; // max accepted packet size in bytes; 0 = no limit (default: 0)
