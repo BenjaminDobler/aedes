@@ -486,6 +486,30 @@ test('handler calls done when disconnect or unknown packet cmd is received', asy
   })
 })
 
+test('[#833] AUTH from a connecting client with no enhanced-auth exchange in flight is dropped', async (t) => {
+  t.plan(2)
+
+  const broker = await Aedes.createBroker()
+  t.after(() => broker.close())
+
+  const s = setup(broker)
+  // Models the race window: a client mid-connect (connecting, not yet connected)
+  // with no `_enhancedAuth` state sends an AUTH. It is not a re-auth (that path is
+  // gated on `connected`), so it must be dropped — the connection closed — rather
+  // than mishandled. Driven through the handler directly because the enqueue/pause
+  // machinery makes this interleaving hard to force deterministically from a socket.
+  s.client.connecting = true
+  const clientError = once(broker, 'clientError')
+  await new Promise(resolve => {
+    handle(s.client, { cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256' } }, function done () {
+      t.assert.ok(true, 'calls done for a stray AUTH on a connecting client')
+      resolve()
+    })
+  })
+  const [, err] = await clientError
+  t.assert.match(err.message, /unexpected AUTH/, 'surfaced as a client error')
+})
+
 test('reject second CONNECT Packet sent while first CONNECT still in preConnect stage', async (t) => {
   t.plan(3)
 
