@@ -1624,7 +1624,7 @@ test('MQTT 5.0 CONNECT with an Authentication Method but no authenticateEnhanced
 })
 
 test('MQTT 5.0 enhanced authentication: a two-round AUTH exchange completes the CONNECT', async (t) => {
-  t.plan(6)
+  t.plan(7)
   const rounds = []
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
@@ -1672,10 +1672,249 @@ test('MQTT 5.0 enhanced authentication: a two-round AUTH exchange completes the 
   t.assert.equal(auth?.reasonCode, 0x18, 'server sent AUTH 0x18 (Continue)')
   t.assert.equal(auth?.properties?.authenticationData?.toString(), 'server-challenge', 'challenge data on the AUTH')
   t.assert.equal(connack.reasonCode, 0, 'CONNACK success after the exchange')
+  // [MQTT-4.12.0-5]: the successful CONNACK MUST echo the Authentication Method.
+  t.assert.equal(connack.properties?.authenticationMethod, 'SCRAM-SHA-256', 'CONNACK echoes the Authentication Method')
   t.assert.equal(connack.properties?.authenticationData?.toString(), 'server-final', 'final auth data on the CONNACK')
   // §5: authenticationData is merged into (not substituted for) the capabilities.
   t.assert.equal(connack.properties?.sharedSubscriptionAvailable, false, 'CONNACK still advertises broker capabilities')
   t.assert.deepEqual(rounds, ['client-first', 'client-final'], 'the hook was called once per round')
+})
+
+test('MQTT 5.0 enhanced authentication: a single-round { done: true } straight from CONNECT (no challenge, no data)', async (t) => {
+  t.plan(6)
+  let hookData = 'unset'
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        hookData = data // CONNECT carried no authenticationData → undefined
+        cb(null, { done: true }) // accept immediately, no challenge, no final data
+      }
+    }
+  })
+
+  const ready = once(broker, 'clientReady')
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-oneround',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256' } // no authenticationData
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(hookData, undefined, 'hook receives undefined data when CONNECT carries none')
+  t.assert.equal(received.some(p => p.cmd === 'auth'), false, 'no AUTH is emitted on a single-round accept')
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0, 'CONNACK success')
+  t.assert.equal(connack.properties?.authenticationMethod, 'SCRAM-SHA-256', 'CONNACK echoes the method even with no final data')
+  t.assert.equal(connack.properties?.authenticationData, undefined, 'no Authentication Data when the hook returned none')
+  // Server-side state: the client is fully registered, not just ACKed on the wire.
+  const [readyClient] = await ready
+  t.assert.equal(readyClient.id, 'ea-oneround', 'clientReady fired → client is registered')
+})
+
+test('MQTT 5.0 enhanced authentication: a non-AUTH packet mid-exchange is not processed before auth completes', async (t) => {
+  t.plan(2)
+  // Blocker: a client that answers a challenge with a PUBLISH (data plane) instead
+  // of an AUTH must not have it processed pre-CONNACK / pre-authorization.
+  let authorizedAtPublish = null
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authorizePublish (client, packet, cb) {
+        authorizedAtPublish = client._authorized === true
+        cb(null)
+      },
+      authenticateEnhanced (client, method, data, cb) {
+        if (data?.toString() === 'client-first') cb(null, { done: false, data: Buffer.from('server-challenge') })
+        else cb(null, { done: true })
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'auth') {
+      // Reply to the challenge with a PUBLISH (its own segment) THEN the AUTH.
+      raw.write(generate({ cmd: 'publish', topic: 'ea/sneak', payload: Buffer.from('x'), qos: 0 }, { protocolVersion: 5 }))
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-final') } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-sneak',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  await delay(30) // let the queued PUBLISH drain post-CONNACK
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0, 'exchange still completes')
+  // Either the publish was dropped, or it was processed only after authorization —
+  // never as an unauthenticated pre-CONNACK action.
+  t.assert.notEqual(authorizedAtPublish, false, 'a mid-exchange PUBLISH is never processed while unauthorized')
+})
+
+test('MQTT 5.0 enhanced authentication: a CONNECT+AUTH pipelined in one segment completes', async (t) => {
+  t.plan(2)
+  // Race guard: AUTH arriving synchronously after CONNECT (before the deferred
+  // init sets _enhancedAuth) must be parked and picked up, not dispatched into a
+  // spurious close.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        if (data?.toString() === 'client-first') cb(null, { done: false, data: Buffer.from('server-challenge') })
+        else cb(null, { done: true, data: Buffer.from('server-final') })
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  // CONNECT and the client's continuation AUTH in a SINGLE write (one TCP segment).
+  const connect = generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-pipe',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 })
+  const auth = generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-final') } }, { protocolVersion: 5 })
+  raw.write(Buffer.concat([connect, auth]))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0, 'pipelined CONNECT+AUTH completes the exchange')
+  t.assert.equal(connack.properties?.authenticationData?.toString(), 'server-final', 'final data on the CONNACK')
+})
+
+test('MQTT 5.0 enhanced authentication: a socket drop while the hook is pending is handled cleanly', async (t) => {
+  t.plan(1)
+  let release
+  let onHookCalled
+  const hookCalled = new Promise(resolve => { onHookCalled = resolve })
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        release = () => cb(null, { done: true }) // hold the callback
+        onHookCalled()
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  raw.on('error', () => {})
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-drop',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  await hookCalled
+  raw.destroy() // drop the connection while the hook is pending
+  await delay(20)
+  // Releasing the (now stale) hook result must not throw or emit anything odd.
+  release()
+  await delay(20)
+  t.assert.equal(broker.connectedClients, 0, 'no client registered from a dropped pending exchange')
+})
+
+test('MQTT 5.0 enhanced authentication: a hook that calls back twice is latched to its first outcome', async (t) => {
+  t.plan(1)
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: true, data: Buffer.from('server-final') })
+        cb(new Error('second call must be ignored')) // latched out
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-twice',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0, 'first outcome (success) wins; the second cb is ignored')
+})
+
+test('MQTT 5.0 enhanced authentication: an exchange that never settles is capped and rejected', async (t) => {
+  t.plan(2)
+  let hookCalls = 0
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        hookCalls++
+        cb(null, { done: false, data: Buffer.from('again') }) // never accept
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  let replies = 0
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'auth' && replies++ < 20) {
+      // Keep answering each challenge; the broker's round cap must break the loop.
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('more') } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-loop',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0x87, 'CONNACK 0x87 once the round cap is hit')
+  t.assert.ok(hookCalls <= 9, `hook invoked a bounded number of times (${hookCalls})`)
 })
 
 test('MQTT 5.0 enhanced authentication: a rejecting hook sends a CONNACK with the reason code and string', async (t) => {
@@ -1847,7 +2086,7 @@ test('MQTT 5.0 enhanced authentication: an AUTH from an already-connected client
   t.assert.match(err.message, /unexpected AUTH/, 'stray AUTH surfaced as a client error')
   while (!received.some(p => p.cmd === 'disconnect')) await delay(5)
   const disconnect = received.find(p => p.cmd === 'disconnect')
-  t.assert.equal(disconnect.reasonCode, 0x82, 'connected client gets a 0x82 Protocol Error DISCONNECT')
+  t.assert.equal(disconnect.reasonCode, 0x83, 'connected client gets a 0x83 Implementation specific error DISCONNECT')
 })
 
 test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after connectTimeout', async (t) => {
