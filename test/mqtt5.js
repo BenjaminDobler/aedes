@@ -1950,6 +1950,112 @@ test('MQTT 5.0 enhanced authentication: a rejecting hook sends a CONNACK with th
   t.assert.equal(connack.properties?.reasonString, 'bad credentials', 'CONNACK carries the hook reason string')
 })
 
+test('MQTT 5.0 enhanced authentication: a hook rejecting with a below-threshold reason code is clamped to 0x87', async (t) => {
+  t.plan(1)
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        // A misbehaving hook rejects but hands back 0x00 (SUCCESS) — below the
+        // 0x80 failure threshold. It must be clamped so the CONNACK isn't
+        // SUCCESS-coded on a rejection.
+        cb(Object.assign(new Error('nope'), { reasonCode: 0x00 }))
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-clamp',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0x87, 'below-threshold reason code clamped to 0x87 Not authorized')
+})
+
+test('MQTT 5.0 enhanced authentication: a DISCONNECT during the exchange aborts it', async (t) => {
+  t.plan(2)
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: false, data: Buffer.from('server-challenge') }) // challenge, then wait
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'auth') {
+      // Abort the exchange with a DISCONNECT instead of answering the challenge.
+      raw.write(generate({ cmd: 'disconnect', reasonCode: 0x00 }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-disc',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  await once(raw, 'close')
+  t.assert.ok(received.some(p => p.cmd === 'auth'), 'server challenged before the abort')
+  t.assert.equal(received.some(p => p.cmd === 'connack'), false, 'no CONNACK: the exchange was aborted')
+})
+
+test('MQTT 5.0 enhanced authentication: a CONNECT+DISCONNECT pipelined in one segment aborts the exchange', async (t) => {
+  t.plan(1)
+  // The DISCONNECT is parked in the pre-connected queue (arrives before the
+  // exchange state exists) and drained by _dispatchQueuedAuth once the exchange
+  // is under way — aborting it rather than lingering until the auth timeout.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: false, data: Buffer.from('server-challenge') })
+      }
+    }
+  })
+
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  const connect = generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-pipe-disc',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 })
+  const disconnect = generate({ cmd: 'disconnect', reasonCode: 0x00 }, { protocolVersion: 5 })
+  raw.write(Buffer.concat([connect, disconnect]))
+
+  await once(raw, 'close')
+  t.assert.equal(received.some(p => p.cmd === 'connack'), false, 'no CONNACK: the pipelined DISCONNECT aborted the exchange')
+})
+
 test('MQTT 5.0 enhanced authentication: changing the Authentication Method mid-exchange is a Protocol Error (0x82)', async (t) => {
   t.plan(1)
   const { port } = await createServerAndConnect(t, {
