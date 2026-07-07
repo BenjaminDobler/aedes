@@ -510,6 +510,33 @@ test('[#833] AUTH from a connecting client with no enhanced-auth exchange in fli
   t.assert.match(err.message, /unexpected AUTH/, 'surfaced as a client error')
 })
 
+test('[#833] an enhanced-auth step short-circuits when the client is already closed', async (t) => {
+  t.plan(2)
+
+  let hookCalled = false
+  const broker = await Aedes.createBroker({
+    authenticateEnhanced (client, method, data, cb) {
+      hookCalled = true
+      cb(null, { done: true })
+    }
+  })
+  t.after(() => broker.close())
+
+  const s = setup(broker)
+  // A continuation AUTH races in after the connection has already closed: the step
+  // must not arm a timer or invoke the broker hook on a dead connection.
+  s.client.connecting = true
+  s.client.closed = true
+  s.client._enhancedAuth = { method: 'SCRAM-SHA-256', rounds: 0, onSuccess () {}, onFailure () {} }
+  await new Promise(resolve => {
+    handle(s.client, { cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256' } }, function done () {
+      t.assert.ok(true, 'calls done')
+      resolve()
+    })
+  })
+  t.assert.equal(hookCalled, false, 'the authenticateEnhanced hook is not invoked on a closed connection')
+})
+
 test('reject second CONNECT Packet sent while first CONNECT still in preConnect stage', async (t) => {
   t.plan(3)
 
