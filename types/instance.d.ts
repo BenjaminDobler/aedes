@@ -32,6 +32,19 @@ export const enum AuthErrorCode {
 
 export type AuthenticateError = Error & { returnCode: AuthErrorCode }
 
+// MQTT 5.0 Enhanced Authentication (§4.12). An error rejects the CONNECT; its
+// optional reasonCode / reasonString are surfaced on the CONNACK.
+export type EnhancedAuthError = Error & { reasonCode?: number, reasonString?: string }
+
+// One step of the enhanced-auth exchange. `done: false` sends the client another
+// AUTH challenge (carrying `data` / `properties`); `done: true` accepts the
+// connection (any `data` becomes the CONNACK Authentication Data).
+export interface EnhancedAuthResult {
+  done: boolean;
+  data?: Buffer;
+  properties?: object;
+}
+
 type PreConnectHandler = (
   client: Client,
   packet: ConnectPacket,
@@ -43,6 +56,16 @@ type AuthenticateHandler = (
   username: Readonly<string | undefined>,
   password: Readonly<Buffer | undefined>,
   done: (error: AuthenticateError | null, success: boolean | null) => void
+) => void
+
+// MQTT 5.0 Enhanced Authentication (§4.12): drives the AUTH-packet exchange for a
+// CONNECT carrying an Authentication Method. Called once per round with the
+// client's latest Authentication Data.
+type AuthenticateEnhancedHandler = (
+  client: Client,
+  method: Readonly<string>,
+  data: Readonly<Buffer | undefined>,
+  done: (error: EnhancedAuthError | null, result?: EnhancedAuthResult | null) => void
 ) => void
 
 type AuthorizePublishHandler = (
@@ -97,6 +120,7 @@ export interface AedesOptions {
   responseInformation?: string | null | ((client: Client) => string | undefined); // MQTT 5.0 Response Information returned in CONNACK on Request Response Information (null = disabled, the default)
   preConnect?: PreConnectHandler;
   authenticate?: AuthenticateHandler;
+  authenticateEnhanced?: AuthenticateEnhancedHandler | null;
   authorizePublish?: AuthorizePublishHandler;
   authorizeSubscribe?: AuthorizeSubscribeHandler;
   authorizeForward?: AuthorizeForwardHandler;
@@ -187,6 +211,7 @@ export class Aedes extends EventEmitter {
 
   preConnect: PreConnectHandler
   authenticate: AuthenticateHandler
+  authenticateEnhanced: AuthenticateEnhancedHandler | null
   authorizePublish: AuthorizePublishHandler
   authorizeSubscribe: AuthorizeSubscribeHandler
   authorizeForward: AuthorizeForwardHandler

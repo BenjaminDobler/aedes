@@ -31,6 +31,7 @@
   - [aedes.close (\[callback\])](#aedesclose-callback)
   - [Handler: preConnect (client, packet, callback)](#handler-preconnect-client-packet-callback)
   - [Handler: authenticate (client, username, password, callback)](#handler-authenticate-client-username-password-callback)
+  - [Handler: authenticateEnhanced (client, method, data, callback)](#handler-authenticateenhanced-client-method-data-callback)
   - [Handler: authorizePublish (client, packet, callback)](#handler-authorizepublish-client-packet-callback)
   - [Handler: authorizeSubscribe (client, subscription, callback)](#handler-authorizesubscribe-client-subscription-callback)
   - [Handler: authorizeForward (client, packet)](#handler-authorizeforward-client-packet)
@@ -394,6 +395,45 @@ aedes.authenticate = function (client, username, password, callback) {
 ```
 
 Please refer to [Connect Return Code](http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Table_3.1_-) to see their meanings.
+
+## Handler: authenticateEnhanced (client, method, data, callback)
+
+- client: [`<Client>`](./Client.md)
+- method: `<string>` the client's Authentication Method (constant for the whole exchange)
+- data: `<Buffer>` | `undefined` the client's latest Authentication Data
+- callback: `<Function>` `(error, result) => void`
+  - error `<Error>` | `null`
+  - result `<object>` | `null`
+    - done `<boolean>` `true` accepts the connection; `false` sends the client another `AUTH` challenge
+    - data `<Buffer>` (optional) Authentication Data — the challenge on `done: false`, the final data (returned on the `CONNACK`) on `done: true`
+    - properties `<object>` (optional) extra MQTT 5.0 properties for the challenge `AUTH` (e.g. `reasonString`)
+
+__MQTT 5.0 only__ ([§4.12 Enhanced Authentication](https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901256)). This handler drives a multi-round `AUTH`-packet challenge/response for a `CONNECT` that carries an Authentication Method, instead of the username/password [`authenticate`](#handler-authenticate-client-username-password-callback) flow. It is invoked once per round with the client's most recent Authentication Data.
+
+By default `authenticateEnhanced` is `null` (unset): a `CONNECT` that asks for enhanced authentication is rejected with reason code `0x8C` (Bad authentication method). Set the handler to enable it.
+
+Each round, return:
+
+- `callback(null, { done: false, data })` to challenge the client — the broker sends an `AUTH` with reason code `0x18` (Continue authentication) and waits for the client's next `AUTH`.
+- `callback(null, { done: true, data })` to accept — the broker resumes the connect flow and sends the `CONNACK` (any `data` becomes its Authentication Data).
+- `callback(error)` to reject — the broker sends a failing `CONNACK`. Set `error.reasonCode` (default `0x87` Not authorized) and optionally `error.reasonString`.
+
+The Authentication Method must not change during the exchange (a mismatched continuation `AUTH` is a `0x82` Protocol Error). A stalled exchange (the client never answers a challenge) is closed after `connectTimeout`. Re-authentication (the client initiating a fresh `AUTH 0x19` after connecting) is not yet supported — such a packet is rejected as a protocol error.
+
+```js
+aedes.authenticateEnhanced = function (client, method, data, callback) {
+  if (method !== 'SCRAM-SHA-256') {
+    const error = new Error('unsupported method')
+    error.reasonCode = 0x8C
+    return callback(error)
+  }
+  if (data.toString() === 'client-final') {
+    callback(null, { done: true, data: Buffer.from('server-final') })
+  } else {
+    callback(null, { done: false, data: Buffer.from('server-challenge') })
+  }
+}
+```
 
 ## Handler: authorizePublish (client, packet, callback)
 

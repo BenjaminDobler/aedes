@@ -17,6 +17,10 @@ const defaultOptions = {
   decodeProtocol: null,
   preConnect: defaultPreConnect,
   authenticate: defaultAuthenticate,
+  // MQTT 5.0 Enhanced Authentication (§4.12). null = unsupported: a CONNECT
+  // carrying an Authentication Method is rejected with 0x8C. When set, it drives
+  // the AUTH-packet exchange. [#833]
+  authenticateEnhanced: null,
   authorizePublish: defaultAuthorizePublish,
   authorizeSubscribe: defaultAuthorizeSubscribe,
   authorizeForward: defaultAuthorizeForward,
@@ -102,6 +106,7 @@ export class Aedes extends EventEmitter {
 
     this.preConnect = opts.preConnect
     this.authenticate = opts.authenticate
+    this.authenticateEnhanced = opts.authenticateEnhanced
     this.authorizePublish = opts.authorizePublish
     this.authorizeSubscribe = opts.authorizeSubscribe
     this.authorizeForward = opts.authorizeForward

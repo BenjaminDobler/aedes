@@ -3,6 +3,7 @@ import { Socket } from 'node:net'
 import type {
   Brokers,
   AuthenticateError,
+  EnhancedAuthError,
   Client,
   Connection
 } from '../../aedes.js'
@@ -56,6 +57,22 @@ const broker = new Aedes({
       error.returnCode = 1
 
       callback(error, false)
+    }
+  },
+  authenticateEnhanced: (
+    client: Client,
+    method: Readonly<string>,
+    data: Readonly<Buffer | undefined>,
+    done
+  ) => {
+    if (method !== 'SCRAM-SHA-256') {
+      const error = new Error('bad method') as EnhancedAuthError
+      error.reasonCode = 0x8c
+      done(error)
+    } else if (data?.toString() === 'client-final') {
+      done(null, { done: true, data: Buffer.from('server-final') })
+    } else {
+      done(null, { done: false, data: Buffer.from('server-challenge'), properties: { reasonString: 'continue' } })
     }
   },
   authorizePublish: (
