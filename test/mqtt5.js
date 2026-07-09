@@ -2236,6 +2236,137 @@ test('MQTT 5.0 enhanced authentication: a re-auth AUTH from a client that negoti
   t.assert.equal(disconnect.reasonCode, 0x83, 'a negotiated-method client gets a 0x83 Implementation specific error DISCONNECT')
 })
 
+test('MQTT 5.0 enhanced authentication: a connected client sending AUTH 0x18 (not re-auth 0x19) is a Protocol Error (0x82)', async (t) => {
+  t.plan(1)
+  // A client that negotiated a method but sends AUTH with a non-re-auth reason
+  // code is NOT re-authenticating — it is a Protocol Error (0x82), not 0x83.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: true })
+      }
+    }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'connack') {
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256' } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-notreauth',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'disconnect')) await delay(5)
+  const disconnect = received.find(p => p.cmd === 'disconnect')
+  t.assert.equal(disconnect.reasonCode, 0x82, 'wrong reason code (not 0x19) is a Protocol Error')
+})
+
+test('MQTT 5.0 enhanced authentication: a continuation AUTH with a wrong reason code is a Protocol Error (0x82)', async (t) => {
+  t.plan(1)
+  // Mid-exchange the continuation must be 0x18; the correct method with a wrong
+  // reason code (here 0x19) must still be rejected — the right operand of the
+  // continuation guard.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: false, data: Buffer.from('server-challenge') })
+      }
+    }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'auth') {
+      // Correct method, but reason code 0x19 instead of 0x18.
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x19, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-final') } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-badrc',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0x82, 'a non-0x18 continuation AUTH is a Protocol Error')
+})
+
+test('MQTT 5.0 enhanced authentication: pipelined + dribbled AUTHs never invoke the hook concurrently', async (t) => {
+  t.plan(1)
+  // [Blocker regression] A single connection must never have two authenticateEnhanced
+  // calls outstanding at once — overlapping calls corrupt a stateful mechanism's
+  // per-step state. Drive the exact abuse: pipeline extra AUTHs into the CONNECT
+  // segment (they queue) AND dribble more on the wire while an async hook is pending.
+  let inflight = 0
+  let maxInflight = 0
+  let calls = 0
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        inflight++
+        maxInflight = Math.max(maxInflight, inflight)
+        calls++
+        const finish = calls >= 8
+        // Respond asynchronously so overlapping calls would actually overlap.
+        setTimeout(() => {
+          inflight--
+          cb(null, finish ? { done: true } : { done: false, data: Buffer.from('ch') })
+        }, 20)
+      }
+    }
+  })
+
+  const authPkt = () => generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('c') } }, { protocolVersion: 5 })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  let dribbled = 0
+  parser.on('packet', (p) => {
+    // On each server challenge, dribble another AUTH on the wire (bounded).
+    if (p.cmd === 'auth' && dribbled < 4) {
+      dribbled++
+      raw.write(authPkt())
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  // CONNECT + two AUTHs pipelined into one segment → the AUTHs are parked in the
+  // pre-connected queue.
+  const connect = generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-conc',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('c0') }
+  }, { protocolVersion: 5 })
+  raw.write(Buffer.concat([connect, authPkt(), authPkt()]))
+
+  await delay(300)
+  t.assert.equal(maxInflight, 1, 'authenticateEnhanced is never invoked concurrently for one connection')
+})
+
 test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after connectTimeout', async (t) => {
   t.plan(1)
   const { broker, port } = await createServerAndConnect(t, {

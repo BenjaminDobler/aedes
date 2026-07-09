@@ -418,7 +418,7 @@ Each round, return:
 - `callback(null, { done: true, data })` to accept — the broker resumes the connect flow and sends the `CONNACK` (any `data` becomes its Authentication Data).
 - `callback(error)` to reject — the broker sends a failing `CONNACK`. Set `error.reasonCode` (default `0x87` Not authorized) and optionally `error.reasonString`.
 
-The Authentication Method must not change during the exchange (a mismatched continuation `AUTH` is a `0x82` Protocol Error). A stalled exchange (the client never answers a challenge) is closed after `connectTimeout`. Re-authentication (the client initiating a fresh `AUTH 0x19` after connecting) is not yet supported — such a packet is rejected as a protocol error.
+The Authentication Method must not change during the exchange, and a continuation `AUTH` must carry reason code `0x18` (Continue authentication); a mismatched method or reason code is a `0x82` Protocol Error. A stalled exchange (the client never answers a challenge) is closed after `connectTimeout`, and the exchange is capped at 8 rounds — a mechanism that needs more is rejected with CONNACK `0x87` (Not authorized). Re-authentication (a connected client that negotiated a method sending a fresh `AUTH 0x19`) is not yet supported: it is rejected with a `0x83` (Implementation specific error) DISCONNECT. An `AUTH` from a client that negotiated no Authentication Method is instead a `0x82` Protocol Error ([MQTT-4.12.1-1]).
 
 ```js
 aedes.authenticateEnhanced = function (client, method, data, callback) {
