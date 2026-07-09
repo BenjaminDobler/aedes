@@ -537,6 +537,36 @@ test('[#833] an enhanced-auth step short-circuits when the client is already clo
   t.assert.equal(hookCalled, false, 'the authenticateEnhanced hook is not invoked on a closed connection')
 })
 
+test('[#833] a socket close in the setImmediate(init) window arms no enhanced-auth timer', async (t) => {
+  t.plan(2)
+
+  let hookCalled = false
+  const broker = await Aedes.createBroker({
+    authenticateEnhanced (client, method, data, cb) {
+      hookCalled = true
+      cb(null, { done: true })
+    }
+  })
+  t.after(() => broker.close())
+
+  const s = setup(broker)
+  handleConnect(s.client, {
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-init-race',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('x') }
+  }, () => {})
+  // Close synchronously — before the deferred init() macrotask runs. init ->
+  // authenticate -> startEnhancedAuth then reaches a dead client and must arm no
+  // connectTimeout timer (which would later fire a spurious clientError).
+  s.client.close()
+  await delay(20) // let setImmediate(init) run against the closed client
+  t.assert.equal(hookCalled, false, 'the hook is not invoked on a closed connection')
+  t.assert.ok(!s.client._enhancedAuthTimer, 'no orphaned enhanced-auth timer was armed')
+})
+
 test('reject second CONNECT Packet sent while first CONNECT still in preConnect stage', async (t) => {
   t.plan(3)
 

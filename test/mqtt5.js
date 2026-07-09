@@ -2165,10 +2165,10 @@ test('MQTT 5.0 enhanced authentication: a synchronously-throwing hook rejects th
   t.assert.equal(connack.reasonCode, 0x87, 'a throwing hook is contained as an auth failure')
 })
 
-test('MQTT 5.0 enhanced authentication: an AUTH from an already-connected client (re-auth) is a Protocol Error', async (t) => {
+test('MQTT 5.0 enhanced authentication: an AUTH from a client that negotiated no method is a Protocol Error (0x82)', async (t) => {
   t.plan(2)
-  // Re-authentication (AUTH 0x19 after connect) is not yet supported; a connected
-  // client sending AUTH out of the blue must get a protocol-error DISCONNECT.
+  // [MQTT-4.12.1-1]: a client whose CONNECT carried no Authentication Method must
+  // not send AUTH at all — that is a Protocol Error, not a re-auth attempt.
   const { broker, port } = await createServerAndConnect(t)
   const clientError = once(broker, 'clientError')
   const raw = createConnection(port, 'localhost')
@@ -2179,20 +2179,61 @@ test('MQTT 5.0 enhanced authentication: an AUTH from an already-connected client
   parser.on('packet', (p) => {
     received.push(p)
     if (p.cmd === 'connack') {
-      // Now connected — fire a stray AUTH (re-auth attempt).
+      // Now connected — fire a stray AUTH, having negotiated no method.
       raw.write(generate({ cmd: 'auth', reasonCode: 0x19, properties: { authenticationMethod: 'SCRAM-SHA-256' } }, { protocolVersion: 5 }))
     }
   })
   raw.on('data', d => parser.parse(d))
   raw.write(generate({
-    cmd: 'connect', protocolVersion: 5, clientId: 'ea-reauth', clean: true, keepalive: 0
+    cmd: 'connect', protocolVersion: 5, clientId: 'ea-noauth', clean: true, keepalive: 0
   }, { protocolVersion: 5 }))
 
   const [, err] = await clientError
   t.assert.match(err.message, /unexpected AUTH/, 'stray AUTH surfaced as a client error')
   while (!received.some(p => p.cmd === 'disconnect')) await delay(5)
   const disconnect = received.find(p => p.cmd === 'disconnect')
-  t.assert.equal(disconnect.reasonCode, 0x83, 'connected client gets a 0x83 Implementation specific error DISCONNECT')
+  t.assert.equal(disconnect.reasonCode, 0x82, 'never-negotiated client gets a 0x82 Protocol Error DISCONNECT')
+})
+
+test('MQTT 5.0 enhanced authentication: a re-auth AUTH from a client that negotiated a method is 0x83', async (t) => {
+  t.plan(2)
+  // A client that DID negotiate a method and completed enhanced auth is genuinely
+  // re-authenticating (0x19) — not yet supported → Implementation specific error.
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: true }) // accept in one round
+      }
+    }
+  })
+  const clientError = once(broker, 'clientError')
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'connack') {
+      // Connected via enhanced auth — now attempt re-authentication.
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x19, properties: { authenticationMethod: 'SCRAM-SHA-256' } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-reauth',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  const [, err] = await clientError
+  t.assert.match(err.message, /unexpected AUTH/, 'stray AUTH surfaced as a client error')
+  while (!received.some(p => p.cmd === 'disconnect')) await delay(5)
+  const disconnect = received.find(p => p.cmd === 'disconnect')
+  t.assert.equal(disconnect.reasonCode, 0x83, 'a negotiated-method client gets a 0x83 Implementation specific error DISCONNECT')
 })
 
 test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after connectTimeout', async (t) => {
