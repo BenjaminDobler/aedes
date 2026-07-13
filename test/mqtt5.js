@@ -168,6 +168,45 @@ test('MQTT 5.0 outbound Topic Alias: the broker aliases repeated topics to a v5 
   t.assert.equal(publishes[1].payload.toString(), 'two', 'payload still delivered')
 })
 
+test('MQTT 5.0 outbound Topic Alias: mappings reset on reconnect, not carried across connections', async (t) => {
+  t.plan(3)
+  // §3.3.2-11: Topic Alias mappings must not survive a Network Connection. A fresh
+  // Client gets a fresh alias map, so the first PUBLISH after reconnect on a
+  // previously-aliased topic must carry the full topic + a newly-assigned alias —
+  // never an empty topic referencing an alias the new connection never sent.
+  const { connect } = await createServerAndConnect(t)
+  const opts = { clientId: 'oalias-reset', clean: true, reconnectPeriod: 0, properties: { topicAliasMaximum: 5 } }
+
+  const sub1 = connect(opts)
+  await once(sub1, 'connect')
+  const pubs1 = []
+  sub1.on('packetreceive', p => { if (p.cmd === 'publish') pubs1.push(p) })
+  await sub1.subscribeAsync('o/reset', { qos: 0 })
+
+  const pub = connect({ clientId: 'oalias-reset-pub' })
+  t.after(() => pub.end(true))
+  await once(pub, 'connect')
+  await pub.publishAsync('o/reset', 'one')
+  await pub.publishAsync('o/reset', 'two')
+  while (pubs1.length < 2) await delay(5)
+  t.assert.equal(pubs1[1].topic, '', 'alias is established on the first connection (empty topic on reuse)')
+
+  // Reconnect: a brand-new Client on the broker side, hence a new alias map.
+  const closed = new Promise(resolve => sub1.once('close', resolve))
+  sub1.end(true)
+  await closed
+  const sub2 = connect(opts)
+  t.after(() => sub2.end(true))
+  await once(sub2, 'connect')
+  const pubs2 = []
+  sub2.on('packetreceive', p => { if (p.cmd === 'publish') pubs2.push(p) })
+  await sub2.subscribeAsync('o/reset', { qos: 0 })
+  await pub.publishAsync('o/reset', 'three')
+  while (pubs2.length < 1) await delay(5)
+  t.assert.equal(pubs2[0].topic, 'o/reset', 'first PUBLISH after reconnect carries the full topic (map reset)')
+  t.assert.ok(pubs2[0].properties?.topicAlias >= 1, 'and a freshly-assigned alias')
+})
+
 test('MQTT 5.0 outbound Topic Alias: not used when the client did not advertise one', async (t) => {
   t.plan(2)
   const { connect } = await createServerAndConnect(t)
