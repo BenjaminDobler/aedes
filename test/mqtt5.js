@@ -45,6 +45,16 @@ async function createServerAndConnect (t, { brokerOptions } = {}) {
   return { broker, server, port, connect }
 }
 
+// Poll `pred` until it is truthy, throwing after `ms` so a broker that stops
+// delivering surfaces as a clear assertion instead of a 3-minute test timeout.
+async function waitFor (pred, msg, ms = 2000) {
+  const deadline = Date.now() + ms
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error(`waitFor timed out: ${msg}`)
+    await delay(5)
+  }
+}
+
 test('MQTT 5.0 client connects and receives a v5 CONNACK', async (t) => {
   t.plan(2)
   const { connect } = await createServerAndConnect(t)
@@ -154,9 +164,9 @@ test('MQTT 5.0 outbound Topic Alias: the broker aliases repeated topics to a v5 
   const pub = connect({ clientId: 'oalias-pub' })
   await once(pub, 'connect')
   await pub.publishAsync('o/alias', 'one')
-  while (publishes.length < 1) await delay(5)
+  await waitFor(() => publishes.length >= 1, 'first delivery')
   await pub.publishAsync('o/alias', 'two')
-  while (publishes.length < 2) await delay(5)
+  await waitFor(() => publishes.length >= 2, 'second delivery')
 
   // First delivery: full topic + a topic alias that registers the mapping.
   t.assert.equal(publishes[0].topic, 'o/alias', 'first PUBLISH carries the full topic')
@@ -174,7 +184,7 @@ test('MQTT 5.0 outbound Topic Alias: mappings reset on reconnect, not carried ac
   // Client gets a fresh alias map, so the first PUBLISH after reconnect on a
   // previously-aliased topic must carry the full topic + a newly-assigned alias —
   // never an empty topic referencing an alias the new connection never sent.
-  const { connect } = await createServerAndConnect(t)
+  const { broker, connect } = await createServerAndConnect(t)
   const opts = { clientId: 'oalias-reset', clean: true, reconnectPeriod: 0, properties: { topicAliasMaximum: 5 } }
 
   const sub1 = connect(opts)
@@ -184,25 +194,24 @@ test('MQTT 5.0 outbound Topic Alias: mappings reset on reconnect, not carried ac
   await sub1.subscribeAsync('o/reset', { qos: 0 })
 
   const pub = connect({ clientId: 'oalias-reset-pub' })
-  t.after(() => pub.end(true))
   await once(pub, 'connect')
   await pub.publishAsync('o/reset', 'one')
   await pub.publishAsync('o/reset', 'two')
-  while (pubs1.length < 2) await delay(5)
+  await waitFor(() => pubs1.length >= 2, 'first-connection deliveries')
   t.assert.equal(pubs1[1].topic, '', 'alias is established on the first connection (empty topic on reuse)')
 
   // Reconnect: a brand-new Client on the broker side, hence a new alias map.
-  const closed = new Promise(resolve => sub1.once('close', resolve))
+  // Wait for broker-side deregistration (not just the client 'close') so sub2
+  // does not race the old Client through the takeover path.
   sub1.end(true)
-  await closed
+  await waitFor(() => !broker.clients['oalias-reset'], 'old Client deregistered')
   const sub2 = connect(opts)
-  t.after(() => sub2.end(true))
   await once(sub2, 'connect')
   const pubs2 = []
   sub2.on('packetreceive', p => { if (p.cmd === 'publish') pubs2.push(p) })
   await sub2.subscribeAsync('o/reset', { qos: 0 })
   await pub.publishAsync('o/reset', 'three')
-  while (pubs2.length < 1) await delay(5)
+  await waitFor(() => pubs2.length >= 1, 'delivery after reconnect')
   t.assert.equal(pubs2[0].topic, 'o/reset', 'first PUBLISH after reconnect carries the full topic (map reset)')
   t.assert.ok(pubs2[0].properties?.topicAlias >= 1, 'and a freshly-assigned alias')
 })
@@ -219,9 +228,9 @@ test('MQTT 5.0 outbound Topic Alias: not used when the client did not advertise 
   await once(pub, 'connect')
   await pub.publishAsync('o/noalias', 'one')
   await pub.publishAsync('o/noalias', 'two')
-  while (publishes.length < 2) await delay(5)
+  await waitFor(() => publishes.length >= 2, 'both deliveries')
   t.assert.equal(publishes[1].topic, 'o/noalias', 'full topic kept (no aliasing)')
-  t.assert.equal(publishes[1].properties?.topicAlias, undefined, 'no topic alias assigned')
+  t.assert.strictEqual(publishes[1].properties?.topicAlias, undefined, 'no topic alias assigned')
 })
 
 test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full topic', async (t) => {
@@ -235,12 +244,167 @@ test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full t
   const pub = connect({ clientId: 'oalias-full-pub' })
   await once(pub, 'connect')
   await pub.publishAsync('o/a', '1')
-  while (publishes.length < 1) await delay(5)
+  await waitFor(() => publishes.length >= 1, 'first delivery')
   await pub.publishAsync('o/b', '2') // distinct topic, but the single alias slot is taken
-  while (publishes.length < 2) await delay(5)
+  await waitFor(() => publishes.length >= 2, 'second delivery')
   t.assert.equal(publishes[0].properties?.topicAlias, 1, 'first topic gets alias 1')
   t.assert.equal(publishes[1].topic, 'o/b', 'second topic sent with its full name (table full)')
-  t.assert.equal(publishes[1].properties?.topicAlias, undefined, 'no alias assigned once the table is full')
+  t.assert.strictEqual(publishes[1].properties?.topicAlias, undefined, 'no alias assigned once the table is full')
+})
+
+test('MQTT 5.0 outbound Topic Alias: an aliased QoS 1 message keeps its topic when resent after reconnect', async (t) => {
+  t.plan(3)
+  // write.js clones the packet when aliasing precisely because persistence holds
+  // the QoS > 0 packet by reference and must keep its real topic for resend
+  // (client.js outgoingUpdate stores the pre-clone object). Pin it: deliver an
+  // *aliased* message (sent as empty-topic), leave it un-acked, reconnect, and
+  // assert the resent PUBLISH carries the full topic — an in-place mutation would
+  // have corrupted the stored packet to an empty topic. A raw subscriber gives us
+  // control over PUBACK. §3.3.2-11 / write.js:19-21.
+  const { broker, port, connect } = await createServerAndConnect(t)
+  const connectSub = () => generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'oalias-q1',
+    clean: false,
+    keepalive: 0,
+    properties: { topicAliasMaximum: 5, sessionExpiryInterval: 60 }
+  }, { protocolVersion: 5 })
+
+  // First connection: subscribe, receive two deliveries (second is aliased), ACK
+  // only the first, then drop the socket leaving the aliased one un-acked.
+  const raw1 = createConnection(port, 'localhost')
+  raw1.on('error', () => {})
+  const parser1 = createParser({ protocolVersion: 5 })
+  const rx1 = []
+  parser1.on('packet', p => {
+    rx1.push(p)
+    if (p.cmd === 'connack') {
+      raw1.write(generate({ cmd: 'subscribe', messageId: 1, subscriptions: [{ topic: 'o/q1', qos: 1 }] }, { protocolVersion: 5 }))
+    }
+  })
+  raw1.on('data', d => parser1.parse(d))
+  raw1.write(connectSub())
+  await waitFor(() => rx1.some(p => p.cmd === 'suback'), 'subscribed')
+
+  const pub = connect({ clientId: 'oalias-q1-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('o/q1', 'one', { qos: 1 })
+  await waitFor(() => rx1.filter(p => p.cmd === 'publish').length >= 1, 'first delivery')
+  // ACK the first (full-topic) delivery so only the aliased one is left pending.
+  const first = rx1.find(p => p.cmd === 'publish')
+  raw1.write(generate({ cmd: 'puback', messageId: first.messageId }, { protocolVersion: 5 }))
+  await pub.publishAsync('o/q1', 'two', { qos: 1 })
+  await waitFor(() => rx1.filter(p => p.cmd === 'publish').length >= 2, 'aliased delivery')
+  const second = rx1.filter(p => p.cmd === 'publish')[1]
+  t.assert.equal(second.topic, '', 'the second delivery was aliased (empty topic on the wire)')
+  t.assert.equal(second.payload.toString(), 'two', 'payload delivered')
+
+  // Drop the socket with 'two' un-acked; wait for broker-side teardown.
+  raw1.destroy()
+  await waitFor(() => !broker.clients['oalias-q1'], 'old Client deregistered')
+
+  // Reconnect the persistent session: the un-acked 'two' is resent on a fresh
+  // Client (fresh alias map), so it must carry the full topic — proving the
+  // stored packet was never mutated to the empty topic it went out as.
+  const raw2 = createConnection(port, 'localhost')
+  t.after(() => raw2.destroy())
+  raw2.on('error', () => {})
+  const parser2 = createParser({ protocolVersion: 5 })
+  const rx2 = []
+  parser2.on('packet', p => rx2.push(p))
+  raw2.on('data', d => parser2.parse(d))
+  raw2.write(connectSub())
+  await waitFor(() => rx2.some(p => p.cmd === 'publish' && p.payload.toString() === 'two'), 'un-acked message resent')
+  const resent = rx2.find(p => p.cmd === 'publish' && p.payload.toString() === 'two')
+  t.assert.equal(resent.topic, 'o/q1', 'resent QoS 1 PUBLISH carries the full topic (stored packet not mutated)')
+})
+
+test('MQTT 5.0 outbound Topic Alias: independent per-subscriber sequences on fanout; v3/v4 subscribers get none', async (t) => {
+  t.plan(8)
+  // A single publish fans out to per-subscriber Packets that reference-share one
+  // `properties` object (aedes-packet), so aliasing must spread (clone) rather
+  // than mutate. Also: a v3/v4 subscriber must never receive a Topic Alias.
+  const { port, connect } = await createServerAndConnect(t)
+  const collect = (client) => {
+    const pubs = []
+    client.on('packetreceive', p => { if (p.cmd === 'publish') pubs.push(p) })
+    return pubs
+  }
+
+  const subA = connect({ clientId: 'fan-a', properties: { topicAliasMaximum: 5 } })
+  const subB = connect({ clientId: 'fan-b', properties: { topicAliasMaximum: 5 } })
+  // A v3.1.1 subscriber on the same broker — must never see a Topic Alias.
+  const subV4 = mqtt.connect({ port, host: 'localhost', protocolVersion: 4, clientId: 'fan-v4', reconnectPeriod: 0 })
+  t.after(() => subV4.end(true))
+  await Promise.all([once(subA, 'connect'), once(subB, 'connect'), once(subV4, 'connect')])
+  const pubsA = collect(subA)
+  const pubsB = collect(subB)
+  const pubsV4 = collect(subV4)
+  await Promise.all([
+    subA.subscribeAsync('o/fan', { qos: 0 }),
+    subB.subscribeAsync('o/fan', { qos: 0 }),
+    subV4.subscribeAsync('o/fan', { qos: 0 })
+  ])
+
+  const pub = connect({ clientId: 'fan-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('o/fan', 'one')
+  await pub.publishAsync('o/fan', 'two')
+  await waitFor(() => pubsA.length >= 2 && pubsB.length >= 2 && pubsV4.length >= 2, 'all subscribers received both')
+
+  // Each v5 subscriber gets its OWN alias sequence: full topic + alias, then empty.
+  t.assert.equal(pubsA[0].topic, 'o/fan', 'sub A: first carries the full topic')
+  t.assert.ok(pubsA[0].properties?.topicAlias >= 1, 'sub A: first assigns an alias')
+  t.assert.equal(pubsA[1].topic, '', 'sub A: second reuses the alias (empty topic)')
+  t.assert.equal(pubsB[0].topic, 'o/fan', 'sub B: first carries the full topic independently')
+  t.assert.equal(pubsB[1].topic, '', 'sub B: second reuses its own alias')
+  t.assert.equal(pubsA[1].properties?.topicAlias, pubsB[1].properties?.topicAlias, 'per-connection aliases (both 1) — spread, not shared/mutated')
+  // The v3/v4 subscriber must get the full topic on BOTH deliveries and no alias.
+  t.assert.equal(pubsV4[1].topic, 'o/fan', 'v4 sub: full topic on every delivery')
+  t.assert.strictEqual(pubsV4[1].properties?.topicAlias, undefined, 'v4 sub: never receives a Topic Alias')
+})
+
+test('MQTT 5.0 outbound Topic Alias: a duplicated Topic Alias Maximum in CONNECT does not crash delivery', async (t) => {
+  t.plan(2)
+  // §3.1.2.11.5: a repeated Topic Alias Maximum is a Protocol Error; mqtt-packet
+  // decodes it to an array. That array must not reach the write path as a bogus
+  // max (it would slip past two type-inconsistent guards and throw on the first
+  // delivery). We disable outbound aliasing for the connection rather than crash.
+  const { port, connect } = await createServerAndConnect(t)
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  let onConnack, onSuback
+  const gotConnack = new Promise(resolve => { onConnack = resolve })
+  const gotSuback = new Promise(resolve => { onSuback = resolve })
+  parser.on('packet', p => {
+    received.push(p)
+    if (p.cmd === 'connack') onConnack(p)
+    else if (p.cmd === 'suback') onSuback()
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'oalias-dup',
+    clean: true,
+    keepalive: 0,
+    properties: { topicAliasMaximum: [5, 5] }
+  }, { protocolVersion: 5 }))
+  const connack = await gotConnack
+  t.assert.equal(connack.reasonCode, 0, 'connects despite the duplicated property')
+  raw.write(generate({ cmd: 'subscribe', messageId: 1, subscriptions: [{ topic: 'o/dup', qos: 0 }] }, { protocolVersion: 5 }))
+  await gotSuback
+
+  const pub = connect({ clientId: 'oalias-dup-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('o/dup', 'hello')
+  await waitFor(() => received.some(p => p.cmd === 'publish'), 'delivery arrives without crashing')
+  const delivered = received.find(p => p.cmd === 'publish')
+  t.assert.equal(delivered.topic, 'o/dup', 'delivered with the full topic (aliasing disabled for the bad max)')
 })
 
 test('MQTT 5.0 subscription identifier is echoed on matching publishes', async (t) => {

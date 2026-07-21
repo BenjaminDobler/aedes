@@ -83,8 +83,9 @@ The percentage is **"% of the Paho functional suite that passes"**, not
 "% MQTT-5.0-compliant". The Paho suite is a third-party **happy-path functional**
 test: it exercises the user-facing v5 features well (session expiry, will + will
 delay, message expiry, RH/RAP/NL, request/response, payload format, assigned client
-id, server keep alive, inbound topic aliases, max-packet-size rejection, PUBLISH
-user properties), but it touches only 5 reason codes and deliberately omits large
+id, server keep alive, inbound and broker-assigned outbound topic aliases,
+max-packet-size rejection, PUBLISH user properties), but it touches only 5 reason
+codes and deliberately omits large
 parts of the spec:
 
 - **Error / negative paths** — most of aedes's reason codes (`lib/constants.js`):

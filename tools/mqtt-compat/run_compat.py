@@ -49,9 +49,6 @@ EXPECTED_GAPS = {
         # below (skipped before the gap logic runs), so a duplicate entry here would
         # be unreachable. The receiveMaximum gap it probes is tracked via
         # test_flow_control1 above.
-        "test_server_topic_alias":
-            "broker-assigned (outbound) topic aliases are not implemented; inbound "
-            "aliases work (#840 — spec-optional/MAY, deferred per #821)",
         "test_subscribe_identifiers":
             "a delivery matching multiple overlapping subscriptions echoes only one "
             "Subscription Identifier (#828 [MQTT-3.3.4-4] — deferred per #821)",
