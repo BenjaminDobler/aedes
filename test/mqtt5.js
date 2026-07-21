@@ -1918,8 +1918,8 @@ test('MQTT 5.0 enhanced authentication: an exchange that never settles is capped
 })
 
 test('MQTT 5.0 enhanced authentication: a rejecting hook sends a CONNACK with the reason code and string', async (t) => {
-  t.plan(2)
-  const { port } = await createServerAndConnect(t, {
+  t.plan(3)
+  const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
         // Reject on the first (and only) round with an explicit reason.
@@ -1948,6 +1948,11 @@ test('MQTT 5.0 enhanced authentication: a rejecting hook sends a CONNACK with th
   const connack = received.find(p => p.cmd === 'connack')
   t.assert.equal(connack.reasonCode, 0x87, 'CONNACK carries the hook reason code (0x87 Not authorized)')
   t.assert.equal(connack.properties?.reasonString, 'bad credentials', 'CONNACK carries the hook reason string')
+  // The rejection must not leave a registered client — a leaked pre-registration
+  // socket/registration is exactly the DoS this guards. (Bounded, not once('close'),
+  // to stay deterministic under test ordering.)
+  await delay(40)
+  t.assert.equal(broker.connectedClients, 0, 'no client registered after the rejection')
 })
 
 test('MQTT 5.0 enhanced authentication: a hook rejecting with a below-threshold reason code is clamped to 0x87', async (t) => {
@@ -2132,6 +2137,122 @@ test('MQTT 5.0 enhanced authentication: hook result properties ride the challeng
   const auth = received.find(p => p.cmd === 'auth')
   t.assert.equal(auth?.reasonCode, 0x18, 'server sent AUTH 0x18 (Continue)')
   t.assert.equal(auth?.properties?.reasonString, 'continue please', 'hook result properties ride the challenge AUTH')
+})
+
+test('MQTT 5.0 enhanced authentication: hook result properties are dropped when Request Problem Information is 0', async (t) => {
+  t.plan(2)
+  // [MQTT-3.1.2-29]: with requestProblemInformation=0 the broker must not send a
+  // Reason String / User Property on an AUTH. §3.15.2.2 also allows nothing else,
+  // so a hook returning e.g. serverReference must not leak onto the wire either.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        if (data?.toString() === 'client-first') {
+          cb(null, { done: false, data: Buffer.from('server-challenge'), properties: { reasonString: 'nope', serverReference: 'other:1883' } })
+        } else {
+          cb(null, { done: true })
+        }
+      }
+    }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'auth') {
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-final') } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-rpi0',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first'), requestProblemInformation: false }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const auth = received.find(p => p.cmd === 'auth')
+  t.assert.equal(auth?.properties?.reasonString, undefined, 'no Reason String on the AUTH when RPI=0')
+  t.assert.equal(auth?.properties?.serverReference, undefined, 'a non-allowlisted property is never forwarded onto the AUTH')
+})
+
+test('MQTT 5.0 enhanced authentication: a duplicated Authentication Method is a Protocol Error (0x82)', async (t) => {
+  t.plan(1)
+  // A repeated 0x15 property decodes to an array; it must be rejected at CONNECT,
+  // not forwarded to the hook as method: string[]. §3.1.2.11.9.
+  let hookCalls = 0
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: { authenticateEnhanced (client, method, data, cb) { hookCalls++; cb(null, { done: true }) } }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-dupmethod',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: ['SCRAM-SHA-256', 'SCRAM-SHA-256'] }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0x82, 'duplicated method rejected with 0x82 (hook never reached: ' + hookCalls + ')')
+})
+
+test('MQTT 5.0 enhanced authentication: an empty-string Authentication Method is a Protocol Error (0x82)', async (t) => {
+  t.plan(1)
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: { authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) } }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-emptymethod',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: '' }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0x82, 'empty-string method rejected with 0x82')
+})
+
+test('MQTT 5.0 enhanced authentication: a non-function authenticateEnhanced is treated as no handler (0x8C)', async (t) => {
+  t.plan(1)
+  const { broker, port } = await createServerAndConnect(t)
+  broker.authenticateEnhanced = true // mis-set option: not a function
+  const connErr = once(broker, 'connectionError')
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-badhook',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256' }
+  }, { protocolVersion: 5 }))
+  const [, err] = await connErr
+  t.assert.match(err.message, /authentication method/, 'rejected with 0x8C, hook never called')
 })
 
 test('MQTT 5.0 enhanced authentication: a synchronously-throwing hook rejects the CONNECT', async (t) => {
@@ -2369,7 +2490,7 @@ test('MQTT 5.0 enhanced authentication: pipelined + dribbled AUTHs never invoke 
 
 test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after connectTimeout', async (t) => {
   t.plan(1)
-  const { broker, port } = await createServerAndConnect(t, {
+  const { port } = await createServerAndConnect(t, {
     // Short window so the stalled-exchange timeout fires quickly.
     brokerOptions: {
       connectTimeout: 50,
@@ -2379,11 +2500,16 @@ test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after conne
     }
   })
 
-  const clientError = once(broker, 'clientError')
   const raw = createConnection(port, 'localhost')
   t.after(() => raw.destroy())
   raw.on('error', () => {})
-  // Send CONNECT-with-method, receive the challenge, then never reply.
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  // Send CONNECT-with-method, receive the challenge, then never reply. The timeout
+  // is routed through finishAuth (like every other rejection), so it produces a
+  // rejection CONNACK (0x87) rather than a bare socket close.
   raw.write(generate({
     cmd: 'connect',
     protocolVersion: 5,
@@ -2393,8 +2519,8 @@ test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after conne
     properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
   }, { protocolVersion: 5 }))
 
-  const [, err] = await clientError
-  t.assert.match(err.message, /did not complete in time/, 'stalled exchange is bounded by connectTimeout')
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0x87, 'stalled exchange rejected (0x87) after connectTimeout')
 })
 
 test('MQTT 5.0 retained message on subscribe carries the Subscription Identifier', async (t) => {

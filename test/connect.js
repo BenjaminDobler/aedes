@@ -499,15 +499,17 @@ test('[#833] AUTH from a connecting client with no enhanced-auth exchange in fli
   // than mishandled. Driven through the handler directly because the enqueue/pause
   // machinery makes this interleaving hard to force deterministically from a socket.
   s.client.connecting = true
-  const clientError = once(broker, 'clientError')
+  // No client.id yet (init hasn't run in this window), so the uninitialized-client
+  // selector routes this to connectionError rather than clientError.
+  const connErr = once(broker, 'connectionError')
   await new Promise(resolve => {
     handle(s.client, { cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256' } }, function done () {
       t.assert.ok(true, 'calls done for a stray AUTH on a connecting client')
       resolve()
     })
   })
-  const [, err] = await clientError
-  t.assert.match(err.message, /unexpected AUTH/, 'surfaced as a client error')
+  const [, err] = await connErr
+  t.assert.match(err.message, /unexpected AUTH/, 'surfaced as a connection error')
 })
 
 test('[#833] an enhanced-auth step short-circuits when the client is already closed', async (t) => {
