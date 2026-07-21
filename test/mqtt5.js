@@ -630,8 +630,8 @@ test('MQTT 5.0 unauthorized publish PUBACK carries a Reason String, honoring Req
   t.assert.equal(acks2[0].properties?.reasonString, undefined, 'Reason String suppressed when RPI=0')
 })
 
-test('MQTT 5.0 a denied SUBSCRIBE returns SUBACK reason code 0x87 (not the coarse 0x80)', async (t) => {
-  t.plan(1)
+test('MQTT 5.0 a denied SUBSCRIBE returns SUBACK 0x87 and a Reason String', async (t) => {
+  t.plan(2)
   const { connect } = await createServerAndConnect(t, {
     brokerOptions: {
       authorizeSubscribe: (client, sub, cb) => cb(null, sub.topic === 'denied' ? null : sub)
@@ -640,15 +640,52 @@ test('MQTT 5.0 a denied SUBSCRIBE returns SUBACK reason code 0x87 (not the coars
   const client = connect({ clientId: 'sub-denied', reconnectPeriod: 0 })
   await once(client, 'connect')
 
-  // mqtt.js rejects subscribeAsync when a granted code is >= 0x80; read it off the
-  // SUBACK packet either way.
-  let granted
-  try {
-    granted = (await client.subscribeAsync('denied')).map(g => g.qos)
-  } catch (err) {
-    granted = err.packet?.granted
-  }
-  t.assert.deepEqual(granted, [0x87], 'denied subscription → 0x87 Not authorized')
+  // mqtt.js rejects subscribeAsync when a granted code is >= 0x80; read the SUBACK
+  // off the wire either way.
+  const subacks = []
+  client.on('packetreceive', p => { if (p.cmd === 'suback') subacks.push(p) })
+  try { await client.subscribeAsync('denied') } catch { /* >= 0x80 rejects */ }
+  while (subacks.length === 0) await delay(5)
+  t.assert.deepEqual(subacks[0].granted, [0x87], 'denied subscription → 0x87 Not authorized')
+  t.assert.equal(subacks[0].properties?.reasonString, 'not authorized to subscribe', 'SUBACK reason string [#823]')
+})
+
+test('MQTT 5.0 UNSUBACK carries a Reason String when no subscription existed', async (t) => {
+  t.plan(2)
+  const { connect } = await createServerAndConnect(t)
+  const client = connect({ clientId: 'unsub-rs' })
+  await once(client, 'connect')
+  const unsubacks = []
+  client.on('packetreceive', p => { if (p.cmd === 'unsuback') unsubacks.push(p) })
+  await client.unsubscribeAsync('never/subscribed')
+  while (unsubacks.length === 0) await delay(5)
+  t.assert.ok(unsubacks[0].granted?.includes(0x11), '0x11 No subscription existed')
+  t.assert.equal(unsubacks[0].properties?.reasonString, 'no subscription existed for one or more topic filters', 'UNSUBACK reason string [#823]')
+})
+
+test('MQTT 5.0 PUBCOMP for an unknown packet id carries 0x92 and a Reason String', async (t) => {
+  t.plan(3)
+  const { port } = await createServerAndConnect(t)
+  // Raw v5 connection so we can send a PUBREL for a packet id the broker never saw.
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const pubcomps = []
+  let connacked
+  const ready = new Promise(resolve => { connacked = resolve })
+  parser.on('packet', (p) => {
+    if (p.cmd === 'connack') connacked()
+    else if (p.cmd === 'pubcomp') pubcomps.push(p)
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({ cmd: 'connect', protocolVersion: 5, clientId: 'q2-pubcomp', clean: true, keepalive: 0 }, { protocolVersion: 5 }))
+  await ready
+  raw.write(generate({ cmd: 'pubrel', messageId: 4242 }, { protocolVersion: 5 }))
+  while (pubcomps.length === 0) await delay(5)
+  t.assert.equal(pubcomps[0].messageId, 4242, 'PUBCOMP echoes the messageId')
+  t.assert.equal(pubcomps[0].reasonCode, 0x92, '0x92 Packet Identifier not found [#822]')
+  t.assert.equal(pubcomps[0].properties?.reasonString, 'packet identifier not found', 'PUBCOMP reason string [#823]')
 })
 
 test('MQTT 5.0 a rejecting PUBREC (reason >= 0x80) ends QoS 2 without a PUBREL', async (t) => {
@@ -1537,19 +1574,18 @@ test('MQTT 5.0 Retain Handling 1 sends retained only for a new subscription', as
 })
 
 test('MQTT 5.0 $share subscribe is refused with 0x9E (shared subs unavailable)', async (t) => {
-  t.plan(1)
+  t.plan(2)
   const { connect } = await createServerAndConnect(t)
   const client = connect({ clientId: 'share-sub' })
   await once(client, 'connect')
-  let granted
+  const subacks = []
+  client.on('packetreceive', p => { if (p.cmd === 'suback') subacks.push(p) })
   try {
-    // mqtt.js resolves with the granted array on success...
-    granted = (await client.subscribeAsync('$share/grp/topic')).map(g => g.qos)
-  } catch (err) {
-    // ...but rejects on a >= 0x80 SUBACK reason code, attaching the raw packet.
-    granted = err.packet?.granted
-  }
-  t.assert.equal(granted?.[0], 0x9E, 'shared subscription refused with 0x9E')
+    await client.subscribeAsync('$share/grp/topic')
+  } catch { /* mqtt.js rejects on a >= 0x80 SUBACK reason code */ }
+  while (subacks.length === 0) await delay(5)
+  t.assert.equal(subacks[0].granted?.[0], 0x9E, 'shared subscription refused with 0x9E')
+  t.assert.equal(subacks[0].properties?.reasonString, 'shared subscriptions are not supported', 'SUBACK reason string [#823]')
 })
 
 test('MQTT 5.0 DISCONNECT cannot raise Session Expiry when CONNECT declared 0', async (t) => {
