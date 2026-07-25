@@ -4,12 +4,13 @@ import type {
   Brokers,
   AuthenticateError,
   EnhancedAuthError,
+  EnhancedAuthResult,
   Client,
   Connection
 } from '../../aedes.js'
 import { Aedes } from '../../aedes.js'
 import type { AedesPublishPacket, ConnackPacket, ConnectPacket, PingreqPacket, PublishPacket, PubrelPacket, Subscription, SubscribePacket, UnsubscribePacket } from '../../types/packet.js'
-import { expectType } from 'tsd'
+import { expectType, expectError, expectAssignable } from 'tsd'
 
 // Aedes server
 expectType<Promise<Aedes>>(Aedes.createBroker())
@@ -273,3 +274,13 @@ expectType<void>(
     () => {}
   )
 )
+
+// [#833] EnhancedAuthResult shape checks: a well-formed result is assignable...
+expectAssignable<EnhancedAuthResult>({ done: true })
+expectAssignable<EnhancedAuthResult>({ done: false, data: Buffer.from('x'), properties: { reasonString: 'go' } })
+// ...but malformed ones are rejected.
+expectError<EnhancedAuthResult>({ done: 'yes' }) // done must be boolean
+expectError<EnhancedAuthResult>({ done: true, data: 'not-a-buffer' }) // data must be a Buffer
+// AUTH allows only Reason String / User Property — Authentication Method / Data
+// are owned by aedes and not accepted on the hook result properties.
+expectError<EnhancedAuthResult>({ done: false, properties: { authenticationMethod: 'X' } })

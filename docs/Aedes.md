@@ -52,6 +52,7 @@
   - `heartbeatInterval` `<number>` an interval in millisconds at which server beats its health signal in `$SYS/<aedes.id>/heartbeat` topic. __Default__: `60000`
   - `id` `<string>` aedes broker unique identifier. __Default__: `uuidv4()`
   - `connectTimeout` `<number>` maximum waiting time in milliseconds waiting for a [`CONNECT`][CONNECT] packet. __Default__: `30000`
+  - `maxAuthRounds` `<number>` MQTT 5.0 only. Maximum number of Enhanced Authentication (§4.12) challenge/response rounds — i.e. [`authenticateEnhanced`](#handler-authenticateenhanced-client-method-data-callback) invocations — allowed per connection before the exchange is rejected with CONNACK `0x97` (Quota exceeded). Bounds the pre-auth work an unauthenticated client can force; raise it for a mechanism that legitimately needs more steps. __Default__: `8`
   - `keepaliveLimit` `<number>` maximum client keep alive time allowed, 0 means no limit. For MQTT 5.0 clients exceeding this, the broker sends a `Server Keep Alive` in the CONNACK and uses it instead of rejecting the connection. __Default__: `0`
   - `topicAliasMaximum` `<number>` MQTT 5.0 only. Maximum inbound Topic Alias value the broker accepts from a client, advertised in the CONNACK. `0` disables inbound topic aliases. __Default__: `0`
   - `maximumPacketSize` `<number>` MQTT 5.0 only. Maximum size in bytes of a packet the broker accepts, advertised in the CONNACK. Enforced: an oversized inbound frame is rejected as soon as its declared length is known — before the rest of its payload is buffered — with a `DISCONNECT` (reason code `0x95`, Packet too large) for connected v5 clients, or a dropped connection with a `connectionError`/`clientError` for pre-auth or v3/v4 clients. `0` means no limit. __Default__: `0`
@@ -408,17 +409,21 @@ Please refer to [Connect Return Code](http://docs.oasis-open.org/mqtt/mqtt/v3.1.
     - data `<Buffer>` (optional) Authentication Data — the challenge on `done: false`, the final data (returned on the `CONNACK`) on `done: true`
     - properties `<object>` (optional) extra MQTT 5.0 properties for the challenge `AUTH` (e.g. `reasonString`)
 
-__MQTT 5.0 only__ ([§4.12 Enhanced Authentication](https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901256)). This handler drives a multi-round `AUTH`-packet challenge/response for a `CONNECT` that carries an Authentication Method, instead of the username/password [`authenticate`](#handler-authenticate-client-username-password-callback) flow. It is invoked once per round with the client's most recent Authentication Data.
+__MQTT 5.0 only__ ([§4.12 Enhanced Authentication](https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901256)). This handler drives a multi-round `AUTH`-packet challenge/response for a `CONNECT` that carries an Authentication Method. It is invoked once per round with the client's most recent Authentication Data.
 
 By default `authenticateEnhanced` is `null` (unset): a `CONNECT` that asks for enhanced authentication is rejected with reason code `0x8C` (Bad authentication method). Set the handler to enable it.
+
+> __⚠️ Mutual exclusion with [`authenticate`](#handler-authenticate-client-username-password-callback):__ these two hooks do not chain. A `CONNECT` carrying an Authentication Method runs `authenticateEnhanced` __instead of__ `authenticate` — the username/password hook is __not__ called for that client. If your `authenticate` hook does more than check credentials (allow-lists, per-IP counters, setting `client.user`), replicate that logic inside `authenticateEnhanced`, or it is silently skipped for any client that requests enhanced authentication.
 
 Each round, return:
 
 - `callback(null, { done: false, data })` to challenge the client — the broker sends an `AUTH` with reason code `0x18` (Continue authentication) and waits for the client's next `AUTH`.
 - `callback(null, { done: true, data })` to accept — the broker resumes the connect flow and sends the `CONNACK` (any `data` becomes its Authentication Data).
-- `callback(error)` to reject — the broker sends a failing `CONNACK`. Set `error.reasonCode` (default `0x87` Not authorized) and optionally `error.reasonString`.
+- `callback(error)` to reject — the broker sends a failing `CONNACK`. Set `error.reasonCode` (default `0x87` Not authorized; any value below `0x80` is clamped to `0x87`) and optionally `error.reasonString`.
 
-The Authentication Method must not change during the exchange, and a continuation `AUTH` must carry reason code `0x18` (Continue authentication); a mismatched method or reason code is a `0x82` Protocol Error. A stalled exchange (the client never answers a challenge) is closed after `connectTimeout`, and the exchange is capped at 8 rounds — a mechanism that needs more is rejected with CONNACK `0x87` (Not authorized). Re-authentication (a connected client that negotiated a method sending a fresh `AUTH 0x19`) is not yet supported: it is rejected with a `0x83` (Implementation specific error) DISCONNECT. An `AUTH` from a client that negotiated no Authentication Method is instead a `0x82` Protocol Error ([MQTT-4.12.1-1]).
+A `result.properties` object may carry a `reasonString` / `userProperties` for the challenge `AUTH` only — the Authentication Method and Data are set by the broker, and no other property is forwarded ([§3.15.2.2]). These optional properties are dropped when the client disabled Request Problem Information, or to fit the client's Maximum Packet Size.
+
+The Authentication Method must not change during the exchange, and a continuation `AUTH` must carry reason code `0x18` (Continue authentication); a mismatched method or reason code is a `0x82` Protocol Error. A stalled exchange (the client never answers a challenge) is closed after `connectTimeout`, and the exchange is capped at [`maxAuthRounds`](#new-aedesoptions) rounds (default `8`) — a mechanism that needs more is rejected with CONNACK `0x97` (Quota exceeded). Re-authentication (a connected client that negotiated a method sending a fresh `AUTH 0x19`) is not yet supported: it is rejected with a `0x83` (Implementation specific error) DISCONNECT. An `AUTH` from a client that negotiated no Authentication Method is instead a `0x82` Protocol Error ([MQTT-4.12.1-1]).
 
 ```js
 aedes.authenticateEnhanced = function (client, method, data, callback) {

@@ -539,6 +539,29 @@ test('[#833] an enhanced-auth step short-circuits when the client is already clo
   t.assert.equal(hookCalled, false, 'the authenticateEnhanced hook is not invoked on a closed connection')
 })
 
+test('[#833] an AUTH from a connected v3/v4 client is dropped (handleAuth does not gate on version)', async (t) => {
+  t.plan(2)
+  // AUTH is a v5-only packet, so mqtt-packet's parser never yields one for a v3/v4
+  // client on the wire — drive it through handle() directly. A connected v4 client
+  // that somehow presents an AUTH-shaped packet must be dropped, not mishandled.
+  const broker = await Aedes.createBroker()
+  t.after(() => broker.close())
+
+  const s = setup(broker)
+  s.client.version = 4
+  s.client.id = 'v4-auth'
+  s.client.connected = true
+  const clientError = once(broker, 'clientError')
+  await new Promise(resolve => {
+    handle(s.client, { cmd: 'auth', reasonCode: 0x18, properties: {} }, function done () {
+      t.assert.ok(true, 'calls done for a v3/v4 AUTH')
+      resolve()
+    })
+  })
+  const [, err] = await clientError
+  t.assert.match(err.message, /unexpected AUTH/, 'surfaced as a client error and dropped')
+})
+
 test('[#833] a socket close in the setImmediate(init) window arms no enhanced-auth timer', async (t) => {
   t.plan(2)
 

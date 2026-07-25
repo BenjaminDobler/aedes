@@ -1,6 +1,7 @@
 import { Duplex } from 'node:stream'
 import { Socket } from 'node:net'
 import { IncomingMessage } from 'node:http'
+import { IAuthPacket } from 'mqtt-packet'
 import { Client } from './client.js'
 import type {
   AedesPublishPacket,
@@ -32,9 +33,40 @@ export const enum AuthErrorCode {
 
 export type AuthenticateError = Error & { returnCode: AuthErrorCode }
 
+// MQTT 5.0 CONNACK reason codes a rejection may carry (the failure subset aedes
+// emits, § Table 2-6). A hook returning a code below 0x80 is clamped to 0x87.
+export const enum ConnackReasonCode {
+  UNSPECIFIED_ERROR = 0x80,
+  MALFORMED_PACKET = 0x81,
+  PROTOCOL_ERROR = 0x82,
+  IMPLEMENTATION_SPECIFIC_ERROR = 0x83,
+  UNSUPPORTED_PROTOCOL_VERSION = 0x84,
+  CLIENT_IDENTIFIER_NOT_VALID = 0x85,
+  BAD_USERNAME_OR_PASSWORD = 0x86,
+  NOT_AUTHORIZED = 0x87,
+  SERVER_UNAVAILABLE = 0x88,
+  SERVER_BUSY = 0x89,
+  BANNED = 0x8A,
+  BAD_AUTHENTICATION_METHOD = 0x8C,
+  TOPIC_NAME_INVALID = 0x90,
+  PACKET_TOO_LARGE = 0x95,
+  QUOTA_EXCEEDED = 0x97,
+  PAYLOAD_FORMAT_INVALID = 0x99,
+  RETAIN_NOT_SUPPORTED = 0x9A,
+  QOS_NOT_SUPPORTED = 0x9B,
+  USE_ANOTHER_SERVER = 0x9C,
+  SERVER_MOVED = 0x9D,
+  CONNECTION_RATE_EXCEEDED = 0x9F,
+}
+
 // MQTT 5.0 Enhanced Authentication (§4.12). An error rejects the CONNECT; its
 // optional reasonCode / reasonString are surfaced on the CONNACK.
-export type EnhancedAuthError = Error & { reasonCode?: number, reasonString?: string }
+export type EnhancedAuthError = Error & { reasonCode?: ConnackReasonCode, reasonString?: string }
+
+// Properties a hook may attach to a challenge AUTH. AUTH allows only Reason String
+// and User Property (§3.15.2.2); Authentication Method / Data are owned by aedes,
+// so they are excluded here. Subject to the client's Request Problem Information.
+export type EnhancedAuthProperties = Omit<NonNullable<IAuthPacket['properties']>, 'authenticationMethod' | 'authenticationData'>
 
 // One step of the enhanced-auth exchange. `done: false` sends the client another
 // AUTH challenge (carrying `data` / `properties`); `done: true` accepts the
@@ -42,7 +74,7 @@ export type EnhancedAuthError = Error & { reasonCode?: number, reasonString?: st
 export interface EnhancedAuthResult {
   done: boolean;
   data?: Buffer;
-  properties?: object;
+  properties?: EnhancedAuthProperties;
 }
 
 type PreConnectHandler = (
