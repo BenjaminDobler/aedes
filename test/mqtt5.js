@@ -1923,6 +1923,49 @@ test('MQTT 5.0 enhanced authentication: an exchange that never settles is capped
   t.assert.equal(broker.connectedClients, 0, 'no client registered after the round-cap rejection')
 })
 
+test('MQTT 5.0 enhanced authentication: a hook that challenges once then rejects on the second round sends a rejection CONNACK', async (t) => {
+  t.plan(3)
+  // Every other rejection test rejects on round 1; this proves a failure AFTER a
+  // round has elapsed (the canonical "wrong final SCRAM proof") is clean —
+  // state.rounds > 1 at rejection, correct reason code/string, no registration.
+  let round = 0
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        if (++round === 1) cb(null, { done: false, data: Buffer.from('server-challenge') })
+        else cb(Object.assign(new Error('bad final proof'), { reasonCode: 0x87, reasonString: 'bad final proof' }))
+      }
+    }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => {
+    received.push(p)
+    if (p.cmd === 'auth') {
+      raw.write(generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-final') } }, { protocolVersion: 5 }))
+    }
+  })
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-round2-reject',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  const connack = received.find(p => p.cmd === 'connack')
+  t.assert.equal(connack.reasonCode, 0x87, 'rejection reason code after a completed round')
+  t.assert.equal(connack.properties?.reasonString, 'bad final proof', 'rejection reason string')
+  await delay(40)
+  t.assert.equal(broker.connectedClients, 0, 'no client registered after the round-2 rejection')
+})
+
 test('MQTT 5.0 enhanced authentication: a rejecting hook sends a CONNACK with the reason code and string', async (t) => {
   t.plan(3)
   const { broker, port } = await createServerAndConnect(t, {
@@ -2196,7 +2239,7 @@ test('MQTT 5.0 a data packet arriving before CONNACK (async preConnect) is not p
   t.assert.equal(delivered, null, 'the pre-CONNACK PUBLISH was never delivered (queued, then dropped on rejection)')
 })
 
-test('MQTT 5.0 enhanced authentication: changing the Authentication Method mid-exchange is a Protocol Error (0x82)', async (t) => {
+test('MQTT 5.0 enhanced authentication: changing the Authentication Method mid-exchange is Bad Authentication Method (0x8C)', async (t) => {
   t.plan(1)
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
@@ -2230,7 +2273,7 @@ test('MQTT 5.0 enhanced authentication: changing the Authentication Method mid-e
 
   while (!received.some(p => p.cmd === 'connack')) await delay(5)
   const connack = received.find(p => p.cmd === 'connack')
-  t.assert.equal(connack.reasonCode, 0x82, 'CONNACK 0x82 Protocol Error on a mid-exchange method change')
+  t.assert.equal(connack.reasonCode, 0x8c, 'CONNACK 0x8C Bad Authentication Method on a mid-exchange method change')
 })
 
 test('MQTT 5.0 enhanced authentication: hook Reason String + User Property ride the challenge AUTH', async (t) => {
@@ -2777,8 +2820,8 @@ test('MQTT 5.0 enhanced authentication: pipelined + dribbled AUTHs never invoke 
 })
 
 test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after connectTimeout', async (t) => {
-  t.plan(1)
-  const { port } = await createServerAndConnect(t, {
+  t.plan(2)
+  const { broker, port } = await createServerAndConnect(t, {
     // Short window so the stalled-exchange timeout fires quickly.
     brokerOptions: {
       connectTimeout: 50,
@@ -2809,6 +2852,36 @@ test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after conne
 
   while (!received.some(p => p.cmd === 'connack')) await delay(5)
   t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0x87, 'stalled exchange rejected (0x87) after connectTimeout')
+  await delay(40)
+  t.assert.equal(broker.connectedClients, 0, 'no client registered after the timeout')
+})
+
+test('MQTT 5.0 enhanced authentication: a challenge that cannot fit the client Maximum Packet Size fails cleanly (no hang)', async (t) => {
+  t.plan(1)
+  // [MQTT-3.1.2-25] A client advertising a tiny Maximum Packet Size that the AUTH
+  // challenge can't fit must not stall the exchange until connectTimeout — the
+  // write is a clean failure that tears the connection down with a clientError.
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        cb(null, { done: false, data: Buffer.alloc(64) }) // a challenge that won't fit maximumPacketSize: 8
+      }
+    }
+  })
+  const clientError = once(broker, 'clientError')
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-tinymps',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first'), maximumPacketSize: 8 }
+  }, { protocolVersion: 5 }))
+  const [, err] = await clientError
+  t.assert.match(err.message, /Maximum Packet Size/, 'over-size AUTH surfaced as a clean write failure')
 })
 
 test('MQTT 5.0 retained message on subscribe carries the Subscription Identifier', async (t) => {
