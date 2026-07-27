@@ -233,6 +233,24 @@ test('MQTT 5.0 outbound Topic Alias: not used when the client did not advertise 
   t.assert.strictEqual(publishes[1].properties?.topicAlias, undefined, 'no topic alias assigned')
 })
 
+test('MQTT 5.0 outbound Topic Alias: a caller-supplied topicAlias is forwarded verbatim, not broker-aliased', async (t) => {
+  t.plan(2)
+  // A packet reaching the public client.publish() with properties.topicAlias set is
+  // caller-owned: the broker must forward it verbatim (not assign its own alias),
+  // so the two tables can't disagree and misdeliver.
+  const { broker, connect } = await createServerAndConnect(t)
+  const sub = connect({ clientId: 'oalias-caller', properties: { topicAliasMaximum: 5 } })
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  while (!broker.clients['oalias-caller']) await delay(5)
+  // Directly publish through the broker-side Client with a caller-set topicAlias.
+  broker.clients['oalias-caller'].publish({ cmd: 'publish', topic: 'x/caller', payload: Buffer.from('hi'), qos: 0, properties: { topicAlias: 3 } }, () => {})
+  await waitFor(() => publishes.length >= 1, 'delivery')
+  t.assert.equal(publishes[0].topic, 'x/caller', 'full topic kept (caller owns the alias)')
+  t.assert.equal(publishes[0].properties?.topicAlias, 3, 'the caller topicAlias is forwarded verbatim, not reassigned')
+})
+
 test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full topic', async (t) => {
   t.plan(3)
   const { connect } = await createServerAndConnect(t)
