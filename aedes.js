@@ -23,8 +23,9 @@ const defaultOptions = {
   authenticateEnhanced: null,
   // MQTT 5.0 Enhanced Authentication: maximum number of challenge/response rounds
   // (authenticateEnhanced invocations) allowed per connection before the exchange
-  // is rejected with 0x87. Bounds pre-auth work an unauthenticated client can
-  // force; raise it for a mechanism that legitimately needs more steps. [#833]
+  // is rejected with 0x97 (Quota exceeded). Bounds pre-auth work an unauthenticated
+  // client can force; raise it for a mechanism that legitimately needs more steps.
+  // [#833]
   maxAuthRounds: 8,
   authorizePublish: defaultAuthorizePublish,
   authorizeSubscribe: defaultAuthorizeSubscribe,
@@ -112,7 +113,12 @@ export class Aedes extends EventEmitter {
     this.preConnect = opts.preConnect
     this.authenticate = opts.authenticate
     this.authenticateEnhanced = opts.authenticateEnhanced
-    this.maxAuthRounds = opts.maxAuthRounds
+    // Clamp to a sane positive integer: a NaN/≤0 value would make the round-cap
+    // check (`++rounds > maxAuthRounds`) never fire, silently removing the pre-auth
+    // bound. Sibling numeric limits are clamped the same way.
+    this.maxAuthRounds = Number.isInteger(opts.maxAuthRounds) && opts.maxAuthRounds > 0
+      ? opts.maxAuthRounds
+      : defaultOptions.maxAuthRounds
     this.authorizePublish = opts.authorizePublish
     this.authorizeSubscribe = opts.authorizeSubscribe
     this.authorizeForward = opts.authorizeForward

@@ -20,6 +20,7 @@ const broker = new Aedes({
   concurrency: 100,
   heartbeatInterval: 60000,
   connectTimeout: 30000,
+  maxAuthRounds: 8,
   maxClientsIdLength: 23,
   keepaliveLimit: 0,
   trustProxy: true,
@@ -134,6 +135,10 @@ expectType<Aedes>(new Aedes({ responseInformation: 'resp/base' }))
 expectType<Aedes>(new Aedes({ responseInformation: null }))
 
 expectType<Readonly<Brokers>>(broker.brokers)
+
+// [#833] maxAuthRounds is a public option and instance property.
+expectType<Aedes>(new Aedes({ maxAuthRounds: 32 }))
+expectType<number>(broker.maxAuthRounds)
 
 expectType<Aedes>(broker.on('closed', () => {}))
 expectType<Aedes>(broker.on('client', (client: Client) => {}))

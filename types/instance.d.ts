@@ -150,6 +150,7 @@ export interface AedesOptions {
   sessionExpiryIntervalLimit?: number; // clamp (seconds) on requested Session Expiry Interval; 0 = no cap (default: 0)
   pendingSessionsLimit?: number; // cap on pending session-expiry / delayed-will entries; 0 = unlimited (default: 0)
   responseInformation?: string | null | ((client: Client) => string | undefined); // MQTT 5.0 Response Information returned in CONNACK on Request Response Information (null = disabled, the default)
+  maxAuthRounds?: number; // MQTT 5.0 enhanced auth: max challenge/response rounds (default: 8)
   preConnect?: PreConnectHandler;
   authenticate?: AuthenticateHandler;
   authenticateEnhanced?: AuthenticateEnhancedHandler | null;
@@ -241,6 +242,7 @@ export class Aedes extends EventEmitter {
 
   close (callback?: () => void): void
 
+  maxAuthRounds: number
   preConnect: PreConnectHandler
   authenticate: AuthenticateHandler
   authenticateEnhanced: AuthenticateEnhancedHandler | null
