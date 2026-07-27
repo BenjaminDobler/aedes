@@ -2509,6 +2509,38 @@ test('MQTT 5.0 enhanced authentication: a non-function authenticateEnhanced is t
   t.assert.match(err.message, /authentication method/, 'rejected with 0x8C, hook never called')
 })
 
+test('MQTT 5.0 enhanced authentication: a hook rejecting with a non-Error is coerced (no TypeError)', async (t) => {
+  t.plan(1)
+  // onFailure assigns reasonCode/errorCode/reasonString on the error; a non-Error
+  // rejection (a hook that throws a string) must be coerced first so those don't
+  // TypeError. The reason code (none) clamps to 0x87.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) {
+        throw 'plain string, not an Error' // eslint-disable-line no-throw-literal
+      }
+    }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-nonerr',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('client-first') }
+  }, { protocolVersion: 5 }))
+
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0x87, 'non-Error rejection coerced, clamped to 0x87')
+})
+
 test('MQTT 5.0 enhanced authentication: a synchronously-throwing hook rejects the CONNECT', async (t) => {
   t.plan(2)
   const { broker, port } = await createServerAndConnect(t, {
