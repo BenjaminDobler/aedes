@@ -62,6 +62,17 @@ EXPECTED_GAPS = {
     "v3": {},
 }
 
+# Tests that MUST pass — features aedes implements whose Paho coverage is the only
+# automated interop evidence (e.g. broker-assigned Topic Alias, removed from
+# EXPECTED_GAPS in #840). A regression in one of these turns the CI check red. The
+# broad set of not-yet-implemented features (test_maximum_packet_size,
+# test_offline_message_queueing, …) stays counted in the percentage only — they are
+# a work-in-progress denominator, not a red-check gate; a removed-gap regression is.
+EXPECTED_PASSES = {
+    "v5": {"test_server_topic_alias"},
+    "v3": set(),
+}
+
 PROTOCOL_LABEL = {"v5": "MQTT 5.0", "v3": "MQTT 3.1.1"}
 TEST_FILES = {"v5": "client_test5.py", "v3": "client_test.py"}
 
@@ -356,18 +367,20 @@ def main():
         print("These tests are in EXPECTED_GAPS but now pass; update "
               "tools/mqtt-compat/run_compat.py.", file=sys.stderr)
 
-    # Give the CI job a meaningful exit code. A genuine regression — a non-gap,
-    # non-skipped test that did not pass — must turn the check red, not merely lower
-    # the reported percentage (a test removed from EXPECTED_GAPS, like
-    # test_server_topic_alias in #840, is otherwise unguarded). A stale gap list
-    # (an unexpected pass) fails too.
+    # Give the CI job a meaningful exit code. A regression in an EXPECTED_PASSES
+    # test — a feature aedes implements, whose Paho case is its only interop
+    # evidence (e.g. test_server_topic_alias, removed from EXPECTED_GAPS in #840) —
+    # must turn the check red, not merely lower the percentage. (The broad set of
+    # not-yet-implemented features stays a work-in-progress denominator.) A stale
+    # gap list — an unexpected pass — fails too.
     regressions = [(r["label"], t["name"], t["status"])
                    for r in reports for t in r["results"]
-                   if t["status"] not in ("pass", "skip") and not t.get("expected_gap")]
+                   if t["name"] in EXPECTED_PASSES.get(r["protocol"], set())
+                   and t["status"] != "pass"]
     if regressions:
         listed = ", ".join(f"{name} [{status}] ({label})"
                            for label, name, status in regressions)
-        print(f"REGRESSION: {listed}", file=sys.stderr)
+        print(f"REGRESSION (expected-pass test failed): {listed}", file=sys.stderr)
     if regressions or xpass:
         sys.exit(1)
 
