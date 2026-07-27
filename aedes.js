@@ -6,7 +6,7 @@ import memory from 'aedes-persistence'
 import mqemitter from 'mqemitter'
 import Client from './lib/client.js'
 import { $SYS_PREFIX, batch, noop, runSeries, armLongTimer, topicLevelCount } from './lib/utils.js'
-import { SESSION_NEVER_EXPIRES, ReasonCodes } from './lib/constants.js'
+import { SESSION_NEVER_EXPIRES, OUTBOUND_TOPIC_ALIAS_MAXIMUM_DEFAULT, ReasonCodes } from './lib/constants.js'
 import pkg from './package.json' with { type: 'json' }
 
 const defaultOptions = {
@@ -30,6 +30,11 @@ const defaultOptions = {
   // MQTT 5.0: maximum Topic Alias value the broker accepts from a client.
   // 0 disables inbound topic aliases (the value advertised in CONNACK).
   topicAliasMaximum: 0,
+  // MQTT 5.0: broker-side ceiling on how many Topic Aliases the broker assigns per
+  // connection on OUTBOUND PUBLISHes (the effective max is min(this, the client's
+  // advertised Topic Alias Maximum)). Bounds the never-evicting per-connection
+  // table. 0 disables outbound aliasing entirely. [#840]
+  outboundTopicAliasMaximum: OUTBOUND_TOPIC_ALIAS_MAXIMUM_DEFAULT,
   // MQTT 5.0: maximum size (bytes) of a packet the broker accepts. 0 = no
   // limit (and nothing advertised in CONNACK).
   maximumPacketSize: 0,
@@ -84,6 +89,10 @@ export class Aedes extends EventEmitter {
     // clamp to a safe [1, 100] range; see MAX_TOPIC_LEVELS
     this.maxTopicLevels = Math.min(Math.max(opts.maxTopicLevels, 1), MAX_TOPIC_LEVELS)
     this.topicAliasMaximum = opts.topicAliasMaximum
+    // Clamp to a non-negative integer; a bad value falls back to the default.
+    this.outboundTopicAliasMaximum = Number.isInteger(opts.outboundTopicAliasMaximum) && opts.outboundTopicAliasMaximum >= 0
+      ? opts.outboundTopicAliasMaximum
+      : defaultOptions.outboundTopicAliasMaximum
     this.maximumPacketSize = opts.maximumPacketSize
     this.receiveMaximum = opts.receiveMaximum
     this.sessionExpiryIntervalLimit = opts.sessionExpiryIntervalLimit

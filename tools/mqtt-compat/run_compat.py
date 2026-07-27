@@ -356,6 +356,21 @@ def main():
         print("These tests are in EXPECTED_GAPS but now pass; update "
               "tools/mqtt-compat/run_compat.py.", file=sys.stderr)
 
+    # Give the CI job a meaningful exit code. A genuine regression — a non-gap,
+    # non-skipped test that did not pass — must turn the check red, not merely lower
+    # the reported percentage (a test removed from EXPECTED_GAPS, like
+    # test_server_topic_alias in #840, is otherwise unguarded). A stale gap list
+    # (an unexpected pass) fails too.
+    regressions = [(r["label"], t["name"], t["status"])
+                   for r in reports for t in r["results"]
+                   if t["status"] not in ("pass", "skip") and not t.get("expected_gap")]
+    if regressions:
+        listed = ", ".join(f"{name} [{status}] ({label})"
+                           for label, name, status in regressions)
+        print(f"REGRESSION: {listed}", file=sys.stderr)
+    if regressions or xpass:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

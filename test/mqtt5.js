@@ -252,6 +252,44 @@ test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full t
   t.assert.strictEqual(publishes[1].properties?.topicAlias, undefined, 'no alias assigned once the table is full')
 })
 
+test('MQTT 5.0 outbound Topic Alias: a client advertising above the broker cap is clamped to it', async (t) => {
+  t.plan(2)
+  // The broker option bounds the effective max even when the client advertises far
+  // more: with outboundTopicAliasMaximum: 2 and a client advertising 100, only 2
+  // aliases are assigned and the 3rd distinct topic falls back to the full name.
+  const { connect } = await createServerAndConnect(t, { brokerOptions: { outboundTopicAliasMaximum: 2 } })
+  const sub = connect({ clientId: 'oalias-cap', properties: { topicAliasMaximum: 100 } })
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  await sub.subscribeAsync('c/#', { qos: 0 })
+  const pub = connect({ clientId: 'oalias-cap-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('c/a', '1')
+  await pub.publishAsync('c/b', '2')
+  await pub.publishAsync('c/c', '3') // 3rd distinct topic — beyond the broker cap of 2
+  await waitFor(() => publishes.length >= 3, 'three deliveries')
+  t.assert.equal(publishes[1].properties?.topicAlias, 2, 'second distinct topic still gets alias 2')
+  t.assert.strictEqual(publishes[2].properties?.topicAlias, undefined, 'third falls back to the full topic (broker cap 2)')
+})
+
+test('MQTT 5.0 outbound Topic Alias: outboundTopicAliasMaximum 0 disables outbound aliasing', async (t) => {
+  t.plan(2)
+  const { connect } = await createServerAndConnect(t, { brokerOptions: { outboundTopicAliasMaximum: 0 } })
+  const sub = connect({ clientId: 'oalias-off-opt', properties: { topicAliasMaximum: 5 } })
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  await sub.subscribeAsync('d/x', { qos: 0 })
+  const pub = connect({ clientId: 'oalias-off-opt-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('d/x', '1')
+  await pub.publishAsync('d/x', '2')
+  await waitFor(() => publishes.length >= 2, 'both deliveries')
+  t.assert.equal(publishes[1].topic, 'd/x', 'full topic kept (broker disabled outbound aliasing)')
+  t.assert.strictEqual(publishes[1].properties?.topicAlias, undefined, 'no alias assigned')
+})
+
 test('MQTT 5.0 outbound Topic Alias: aliasing an outbound QoS 1 PUBLISH does not poison the stored packet', async (t) => {
   t.plan(3)
   // write.js SPREADS (shallow-clones) rather than mutating. aedes-packet
@@ -327,11 +365,14 @@ test('MQTT 5.0 outbound Topic Alias: aliasing an outbound QoS 1 PUBLISH does not
   t.assert.strictEqual(resent.properties?.topicAlias, undefined, 'resent PUBLISH carries no stale Topic Alias (stored packet not poisoned)')
 })
 
-test('MQTT 5.0 outbound Topic Alias: independent per-subscriber sequences on fanout; v3/v4 subscribers get none', async (t) => {
-  t.plan(8)
-  // A single publish fans out to per-subscriber Packets that reference-share one
-  // `properties` object (aedes-packet), so aliasing must spread (clone) rather
-  // than mutate. Also: a v3/v4 subscriber must never receive a Topic Alias.
+test('MQTT 5.0 outbound Topic Alias: fanout assigns distinct per-subscriber aliases; v3/v4 subscribers get none', async (t) => {
+  t.plan(5)
+  // Each connection keeps its OWN alias table: subA racks up an alias on a private
+  // topic first, so on the shared topic subA assigns alias 2 while subB assigns
+  // alias 1 — distinct, per-connection numbering. A v3/v4 subscriber never receives
+  // an alias. (The clone-not-mutate invariant is pinned by the QoS 1 poison test
+  // above; it isn't observable on the QoS 0 fanout path, where each subscriber
+  // re-runs aliasing synchronously before its own serialize.)
   const { port, connect } = await createServerAndConnect(t)
   const collect = (client) => {
     const pubs = []
@@ -341,14 +382,15 @@ test('MQTT 5.0 outbound Topic Alias: independent per-subscriber sequences on fan
 
   const subA = connect({ clientId: 'fan-a', properties: { topicAliasMaximum: 5 } })
   const subB = connect({ clientId: 'fan-b', properties: { topicAliasMaximum: 5 } })
-  // A v3.1.1 subscriber on the same broker — must never see a Topic Alias.
   const subV4 = mqtt.connect({ port, host: 'localhost', protocolVersion: 4, clientId: 'fan-v4', reconnectPeriod: 0 })
   t.after(() => subV4.end(true))
   await Promise.all([once(subA, 'connect'), once(subB, 'connect'), once(subV4, 'connect')])
   const pubsA = collect(subA)
   const pubsB = collect(subB)
   const pubsV4 = collect(subV4)
+  // subA also subscribes a private topic to burn alias 1 before the shared one.
   await Promise.all([
+    subA.subscribeAsync('o/priv', { qos: 0 }),
     subA.subscribeAsync('o/fan', { qos: 0 }),
     subB.subscribeAsync('o/fan', { qos: 0 }),
     subV4.subscribeAsync('o/fan', { qos: 0 })
@@ -356,20 +398,21 @@ test('MQTT 5.0 outbound Topic Alias: independent per-subscriber sequences on fan
 
   const pub = connect({ clientId: 'fan-pub' })
   await once(pub, 'connect')
-  await pub.publishAsync('o/fan', 'one')
-  await pub.publishAsync('o/fan', 'two')
-  await waitFor(() => pubsA.length >= 2 && pubsB.length >= 2 && pubsV4.length >= 2, 'all subscribers received both')
+  await pub.publishAsync('o/priv', 'p') // only subA — takes subA's alias 1
+  await waitFor(() => pubsA.length >= 1, 'subA got the private delivery')
+  await pub.publishAsync('o/fan', 'shared') // both v5 subs + the v4 sub
+  await waitFor(() => pubsA.length >= 2 && pubsB.length >= 1 && pubsV4.length >= 1, 'shared delivery fanned out')
 
-  // Each v5 subscriber gets its OWN alias sequence: full topic + alias, then empty.
-  t.assert.equal(pubsA[0].topic, 'o/fan', 'sub A: first carries the full topic')
-  t.assert.ok(pubsA[0].properties?.topicAlias >= 1, 'sub A: first assigns an alias')
-  t.assert.equal(pubsA[1].topic, '', 'sub A: second reuses the alias (empty topic)')
-  t.assert.equal(pubsB[0].topic, 'o/fan', 'sub B: first carries the full topic independently')
-  t.assert.equal(pubsB[1].topic, '', 'sub B: second reuses its own alias')
-  t.assert.equal(pubsA[1].properties?.topicAlias, pubsB[1].properties?.topicAlias, 'per-connection aliases (both 1) — spread, not shared/mutated')
-  // The v3/v4 subscriber must get the full topic on BOTH deliveries and no alias.
-  t.assert.equal(pubsV4[1].topic, 'o/fan', 'v4 sub: full topic on every delivery')
-  t.assert.strictEqual(pubsV4[1].properties?.topicAlias, undefined, 'v4 sub: never receives a Topic Alias')
+  const aFan = pubsA.find(p => p.payload.toString() === 'shared')
+  // subA already used alias 1 for o/priv, so o/fan is alias 2 for subA...
+  t.assert.equal(aFan.properties?.topicAlias, 2, 'sub A: o/fan is alias 2 (o/priv took alias 1)')
+  // ...while subB, with a fresh table, assigns alias 1 to o/fan. Distinct values
+  // prove the shared properties object was cloned, not mutated across subscribers.
+  t.assert.equal(pubsB[0].properties?.topicAlias, 1, 'sub B: o/fan is alias 1 independently')
+  t.assert.equal(aFan.topic, 'o/fan', 'both v5 subs carry the full topic on first use')
+  // The v3/v4 subscriber must get the full topic and no alias.
+  t.assert.equal(pubsV4[0].topic, 'o/fan', 'v4 sub: full topic')
+  t.assert.strictEqual(pubsV4[0].properties?.topicAlias, undefined, 'v4 sub: never receives a Topic Alias')
 })
 
 test('MQTT 5.0 outbound Topic Alias: a duplicated Topic Alias Maximum in CONNECT does not crash delivery', async (t) => {
