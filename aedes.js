@@ -6,7 +6,7 @@ import memory from 'aedes-persistence'
 import mqemitter from 'mqemitter'
 import Client from './lib/client.js'
 import { $SYS_PREFIX, batch, noop, runSeries, armLongTimer, topicLevelCount } from './lib/utils.js'
-import { SESSION_NEVER_EXPIRES, OUTBOUND_TOPIC_ALIAS_MAXIMUM_DEFAULT, ReasonCodes } from './lib/constants.js'
+import { SESSION_NEVER_EXPIRES, ReasonCodes } from './lib/constants.js'
 import pkg from './package.json' with { type: 'json' }
 
 const defaultOptions = {
@@ -33,8 +33,11 @@ const defaultOptions = {
   // MQTT 5.0: broker-side ceiling on how many Topic Aliases the broker assigns per
   // connection on OUTBOUND PUBLISHes (the effective max is min(this, the client's
   // advertised Topic Alias Maximum)). Bounds the never-evicting per-connection
-  // table. 0 disables outbound aliasing entirely. [#840]
-  outboundTopicAliasMaximum: OUTBOUND_TOPIC_ALIAS_MAXIMUM_DEFAULT,
+  // table. Defaults to 0 (disabled, OPT-IN) to match the inbound `topicAliasMaximum`
+  // sibling: enabling it changes wire behaviour (clients start receiving empty-topic
+  // PUBLISHes) and adds per-connection memory, so it should not turn on silently on
+  // upgrade. Set it (e.g. 64) to enable. [#840]
+  outboundTopicAliasMaximum: 0,
   // MQTT 5.0: maximum size (bytes) of a packet the broker accepts. 0 = no
   // limit (and nothing advertised in CONNACK).
   maximumPacketSize: 0,
@@ -89,10 +92,12 @@ export class Aedes extends EventEmitter {
     // clamp to a safe [1, 100] range; see MAX_TOPIC_LEVELS
     this.maxTopicLevels = Math.min(Math.max(opts.maxTopicLevels, 1), MAX_TOPIC_LEVELS)
     this.topicAliasMaximum = opts.topicAliasMaximum
-    // Clamp to a non-negative integer; a bad value falls back to the default.
-    this.outboundTopicAliasMaximum = Number.isInteger(opts.outboundTopicAliasMaximum) && opts.outboundTopicAliasMaximum >= 0
+    // Coerce a non-integer / negative value to 0 (disabled), not to the default:
+    // "bad value" must never mean "silently enabled". A string '0' from env/JSON
+    // config, -1, or 0.5 all disable outbound aliasing rather than turning it on.
+    this.outboundTopicAliasMaximum = Number.isInteger(opts.outboundTopicAliasMaximum) && opts.outboundTopicAliasMaximum > 0
       ? opts.outboundTopicAliasMaximum
-      : defaultOptions.outboundTopicAliasMaximum
+      : 0
     this.maximumPacketSize = opts.maximumPacketSize
     this.receiveMaximum = opts.receiveMaximum
     this.sessionExpiryIntervalLimit = opts.sessionExpiryIntervalLimit

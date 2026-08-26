@@ -24,6 +24,7 @@ const broker = new Aedes({
   trustedProxies: ['127.0.0.1'],
   decodeProtocol: (client: Client, buffer: Buffer) => buffer,
   topicAliasMaximum: 10,
+  outboundTopicAliasMaximum: 64,
   maximumPacketSize: 1048576,
   receiveMaximum: 20,
   sessionExpiryIntervalLimit: 86400,
