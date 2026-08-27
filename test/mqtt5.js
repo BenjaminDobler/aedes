@@ -2239,6 +2239,39 @@ test('MQTT 5.0 a data packet arriving before CONNACK (async preConnect) is not p
   t.assert.equal(delivered, null, 'the pre-CONNACK PUBLISH was never delivered (queued, then dropped on rejection)')
 })
 
+test('MQTT 5.0 a connection torn down mid-connect-pipeline is not registered (no leaked client)', async (t) => {
+  t.plan(3)
+  // [Blocker] A pipelined CONNECT+DISCONNECT (or a socket drop) during the async
+  // connect pipeline can run close() before registerClient. close()'s unregister is
+  // gated on the client already being registered, so it finds nothing and skips —
+  // then the still-pending pipeline registers a DEAD client, leaking it (a spurious
+  // `client` event with no `clientDisconnect`, inflated connectedClients, a never-
+  // freed socket). Model the exact precondition deterministically: an authenticate
+  // hook that destroys the connection before continuing, so registerClient runs with
+  // conn.destroyed = true. The registerClient guard must abort instead of registering.
+  let clientEvents = 0
+  let disconnectEvents = 0
+  const { port, broker } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticate (client, username, password, cb) { client.conn.destroy(); cb(null, true) }
+    }
+  })
+  broker.on('client', () => { clientEvents++ })
+  broker.on('clientDisconnect', () => { disconnectEvents++ })
+
+  for (let i = 0; i < 5; i++) {
+    const raw = createConnection(port, 'localhost')
+    raw.on('error', () => {})
+    raw.write(generate({ cmd: 'connect', protocolVersion: 5, clientId: 'leak-' + i, clean: true, keepalive: 0 }, { protocolVersion: 5 }))
+    await delay(25)
+  }
+  await delay(120)
+
+  t.assert.equal(clientEvents, 0, 'no client was registered for a connection destroyed mid-pipeline')
+  t.assert.equal(disconnectEvents, 0, 'and so no clientDisconnect either')
+  t.assert.equal(broker.connectedClients, 0, 'connectedClients not inflated by dead registrations')
+})
+
 test('MQTT 5.0 enhanced authentication: changing the Authentication Method mid-exchange is Bad Authentication Method (0x8C)', async (t) => {
   t.plan(1)
   const { port } = await createServerAndConnect(t, {
