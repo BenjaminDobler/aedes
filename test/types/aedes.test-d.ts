@@ -136,9 +136,9 @@ expectType<Aedes>(new Aedes({ responseInformation: null }))
 
 expectType<Readonly<Brokers>>(broker.brokers)
 
-// [#833] maxAuthRounds is a public option and instance property.
+// [#833] maxAuthRounds is a public constructor option (not re-exposed as a mutable
+// instance property, matching connectTimeout / maximumPacketSize / etc.).
 expectType<Aedes>(new Aedes({ maxAuthRounds: 32 }))
-expectType<number>(broker.maxAuthRounds)
 
 expectType<Aedes>(broker.on('closed', () => {}))
 expectType<Aedes>(broker.on('client', (client: Client) => {}))

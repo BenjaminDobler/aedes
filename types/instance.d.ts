@@ -33,8 +33,10 @@ export const enum AuthErrorCode {
 
 export type AuthenticateError = Error & { returnCode: AuthErrorCode }
 
-// MQTT 5.0 CONNACK reason codes a rejection may carry (the failure subset aedes
-// emits, § Table 2-6). A hook returning a code below 0x80 is clamped to 0x87.
+// MQTT 5.0 CONNACK reason codes a rejection may carry (the failure subset from
+// Table 3-1). A hook returning any code NOT valid on a CONNACK — a success/< 0x80
+// code, or a real reason code that isn't in this set (e.g. 0x8E, 0x93) — is clamped
+// to 0x87 at runtime.
 export const enum ConnackReasonCode {
   UNSPECIFIED_ERROR = 0x80,
   MALFORMED_PACKET = 0x81,
@@ -242,7 +244,6 @@ export class Aedes extends EventEmitter {
 
   close (callback?: () => void): void
 
-  maxAuthRounds: number
   preConnect: PreConnectHandler
   authenticate: AuthenticateHandler
   authenticateEnhanced: AuthenticateEnhancedHandler | null

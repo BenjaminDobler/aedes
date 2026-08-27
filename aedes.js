@@ -113,9 +113,10 @@ export class Aedes extends EventEmitter {
     this.preConnect = opts.preConnect
     this.authenticate = opts.authenticate
     this.authenticateEnhanced = opts.authenticateEnhanced
-    // Clamp to a sane positive integer: a NaN/≤0 value would make the round-cap
+    // Coerce to a sane positive integer: a NaN/≤0 value would make the round-cap
     // check (`++rounds > maxAuthRounds`) never fire, silently removing the pre-auth
-    // bound. Sibling numeric limits are clamped the same way.
+    // bound — so it must not fail open. (This is one of the few validated options;
+    // most numeric limits above are taken verbatim.)
     this.maxAuthRounds = Number.isInteger(opts.maxAuthRounds) && opts.maxAuthRounds > 0
       ? opts.maxAuthRounds
       : defaultOptions.maxAuthRounds
