@@ -406,7 +406,7 @@ Please refer to [Connect Return Code](http://docs.oasis-open.org/mqtt/mqtt/v3.1.
   - error `<Error>` | `null`
   - result `<object>` | `null`
     - done `<boolean>` `true` accepts the connection; `false` sends the client another `AUTH` challenge
-    - data `<Buffer>` (optional) Authentication Data — the challenge on `done: false`, the final data (returned on the `CONNACK`) on `done: true`
+    - data `<Buffer>` (optional) Authentication Data — the challenge on `done: false`, the final data (returned on the `CONNACK`) on `done: true`. Must be a `Buffer` (not a `Uint8Array`/`TypedArray`). __The final `done: true` data is best-effort:__ if the CONNACK would exceed the client's Maximum Packet Size it is dropped, so a mutual-auth mechanism must not depend on the client receiving the server-final proof — keep it small, or use a challenge round for the proof instead.
     - properties `<object>` (optional) extra MQTT 5.0 properties for the challenge `AUTH` (e.g. `reasonString`)
 
 __MQTT 5.0 only__ ([§4.12 Enhanced Authentication](https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901256)). This handler drives a multi-round `AUTH`-packet challenge/response for a `CONNECT` that carries an Authentication Method. It is invoked once per round with the client's most recent Authentication Data.

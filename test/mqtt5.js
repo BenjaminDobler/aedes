@@ -3313,6 +3313,41 @@ test('MQTT 5.0 enhanced authentication: pipelined + dribbled AUTHs never invoke 
   t.assert.equal(maxInflight, 1, 'authenticateEnhanced is never invoked concurrently for one connection')
 })
 
+test('MQTT 5.0 enhanced authentication: a hook that calls back after the deadline is surfaced, not dropped silently', async (t) => {
+  t.plan(1)
+  // The late callback is the only datum separating "raise connectTimeout" from "the
+  // hook is wedged" — so when authenticateEnhanced calls back after the exchange
+  // already timed out, emit a clientError rather than dropping it.
+  let release
+  let onHeld
+  const held = new Promise(resolve => { onHeld = resolve })
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      connectTimeout: 80, // exchange deadline
+      authenticateEnhanced (client, method, data, cb) { release = () => cb(null, { done: true }); onHeld() }
+    }
+  })
+  const errors = []
+  broker.on('clientError', (c, e) => errors.push(e.message))
+  broker.on('connectionError', (c, e) => errors.push(e.message))
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-late',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('x') }
+  }, { protocolVersion: 5 }))
+  await held
+  await delay(150) // let the deadline fire while the hook is held
+  release() // hook calls back after the exchange already ended
+  await delay(30)
+  t.assert.ok(errors.some(m => /called back at round .* after the exchange had already ended/.test(m)), 'late callback surfaced on clientError/connectionError')
+})
+
 test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after connectTimeout', async (t) => {
   t.plan(2)
   const { broker, port } = await createServerAndConnect(t, {
