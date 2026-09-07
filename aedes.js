@@ -91,7 +91,14 @@ export class Aedes extends EventEmitter {
     this.maxClientsIdLength = opts.maxClientsIdLength
     // clamp to a safe [1, 100] range; see MAX_TOPIC_LEVELS
     this.maxTopicLevels = Math.min(Math.max(opts.maxTopicLevels, 1), MAX_TOPIC_LEVELS)
-    this.topicAliasMaximum = opts.topicAliasMaximum
+    // Clamp like its outbound sibling below: it is advertised as an int16 CONNACK
+    // property, so a non-integer / out-of-range value (65536, Infinity, a JSON-config
+    // string) would make mqtt-packet stream.destroy() every v5 CONNACK — a
+    // self-inflicted v5 outage — and Infinity would also lift the `alias > max` bound
+    // in resolveTopicAlias. A bad value disables inbound aliasing (0).
+    this.topicAliasMaximum = Number.isInteger(opts.topicAliasMaximum) && opts.topicAliasMaximum > 0
+      ? Math.min(opts.topicAliasMaximum, 65535)
+      : 0
     // Coerce a non-integer / negative value to 0 (disabled), not to the default:
     // "bad value" must never mean "silently enabled". A string '0' from env/JSON
     // config, -1, or 0.5 all disable outbound aliasing rather than turning it on.
