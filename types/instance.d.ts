@@ -31,7 +31,7 @@ export const enum AuthErrorCode {
   NOT_AUTHORIZED = 5,
 }
 
-export type AuthenticateError = Error & { returnCode: AuthErrorCode }
+export type AuthenticateError = Error & { returnCode: AuthErrorCode, serverReference?: string }
 
 // MQTT 5.0 CONNACK reason codes a rejection may carry (the failure subset from
 // Table 3-1). A hook returning any code NOT valid on a CONNACK — a success/< 0x80
@@ -63,7 +63,7 @@ export const enum ConnackReasonCode {
 
 // MQTT 5.0 Enhanced Authentication (§4.12). An error rejects the CONNECT; its
 // optional reasonCode / reasonString are surfaced on the CONNACK.
-export type EnhancedAuthError = Error & { reasonCode?: ConnackReasonCode, reasonString?: string }
+export type EnhancedAuthError = Error & { reasonCode?: ConnackReasonCode, reasonString?: string, serverReference?: string }
 
 // Properties a hook may attach to a challenge AUTH. AUTH allows only Reason String
 // and User Property (§3.15.2.2); Authentication Method / Data are owned by aedes,

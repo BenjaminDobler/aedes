@@ -431,18 +431,31 @@ The Authentication Method must not change during the exchange (a changed method 
 > __⚠️ Re-authentication is not yet supported.__ §4.12.1 lets a client that negotiated an Authentication Method re-authenticate mid-session by sending `AUTH 0x19` (Re-authenticate). aedes does not implement this yet: such an `AUTH` is answered with a `0x83` (Implementation specific error) DISCONNECT and the connection is closed. A SCRAM/Kerberos client that refreshes credentials mid-session will therefore lose its session. Tracked in [#1134](https://github.com/moscajs/aedes/issues/1134).
 >
 > __Note:__ the hook receives only `(client, method, data)`. A mechanism that needs other CONNECT fields — a SCRAM `authzid`, OAuth details in CONNECT User Properties, the username — must capture them from a [`preConnect`](#handler-preconnect-client-packet-callback) hook (which gets the full CONNECT packet) and stash them on `client` for the exchange; the CONNECT packet is not retained past connect.
+>
+> __Security:__ `data` is attacker-controlled. Compare authenticator/proof bytes with `crypto.timingSafeEqual` (a byte-wise `===` / `Buffer.equals` is a timing oracle), and keep `error.reasonString` generic — it is copied verbatim onto the rejection CONNACK and reaches the unauthenticated client, so it must not leak which check failed.
 
 ```js
+import { timingSafeEqual } from 'node:crypto'
+
 aedes.authenticateEnhanced = function (client, method, data, callback) {
   if (method !== 'SCRAM-SHA-256') {
     const error = new Error('unsupported method')
     error.reasonCode = 0x8C
     return callback(error)
   }
-  if (data.toString() === 'client-final') {
+  if (client._scramExpectedFinal &&
+      data?.length === client._scramExpectedFinal.length &&
+      timingSafeEqual(data, client._scramExpectedFinal)) {
     callback(null, { done: true, data: Buffer.from('server-final') })
-  } else {
+  } else if (!client._scramExpectedFinal) {
+    // First round: stash the expected client-final proof for the next round to
+    // compare (see the preConnect-stash note above for other CONNECT fields).
+    client._scramExpectedFinal = computeExpectedFinal(client, data)
     callback(null, { done: false, data: Buffer.from('server-challenge') })
+  } else {
+    const error = new Error('authentication failed') // generic; reaches the client
+    error.reasonCode = 0x87
+    callback(error)
   }
 }
 ```

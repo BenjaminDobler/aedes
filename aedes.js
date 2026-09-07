@@ -113,13 +113,17 @@ export class Aedes extends EventEmitter {
     this.preConnect = opts.preConnect
     this.authenticate = opts.authenticate
     this.authenticateEnhanced = opts.authenticateEnhanced
-    // Coerce to a sane positive integer: a NaN/≤0 value would make the round-cap
-    // check (`++rounds > maxAuthRounds`) never fire, silently removing the pre-auth
-    // bound — so it must not fail open. (This is one of the few validated options;
-    // most numeric limits above are taken verbatim.)
-    this.maxAuthRounds = Number.isInteger(opts.maxAuthRounds) && opts.maxAuthRounds > 0
-      ? opts.maxAuthRounds
-      : defaultOptions.maxAuthRounds
+    // maxAuthRounds must be a positive integer. Unlike the sibling limits, `0` is
+    // NOT "unlimited" here — it would make the round-cap check (`++rounds >
+    // maxAuthRounds`) never fire, removing the pre-auth DoS bound. Rather than
+    // silently coerce a bad value (which hides a `'16'`-from-env typo behind an
+    // unexplained 0x97), THROW on a supplied-but-invalid value so the misconfig
+    // surfaces at startup; default to 8 when unset.
+    if (opts.maxAuthRounds !== undefined &&
+        (!Number.isInteger(opts.maxAuthRounds) || opts.maxAuthRounds < 1)) {
+      throw new Error('maxAuthRounds must be a positive integer')
+    }
+    this.maxAuthRounds = opts.maxAuthRounds ?? defaultOptions.maxAuthRounds
     this.authorizePublish = opts.authorizePublish
     this.authorizeSubscribe = opts.authorizeSubscribe
     this.authorizeForward = opts.authorizeForward
