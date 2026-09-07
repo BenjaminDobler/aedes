@@ -95,8 +95,11 @@ export class Aedes extends EventEmitter {
     // Coerce a non-integer / negative value to 0 (disabled), not to the default:
     // "bad value" must never mean "silently enabled". A string '0' from env/JSON
     // config, -1, or 0.5 all disable outbound aliasing rather than turning it on.
+    // Clamp the top to 65535 — Topic Alias is a Two Byte Integer, so a larger value
+    // (e.g. via a preConnect hook raising the client's advertised max) would make
+    // Math.min yield an out-of-range alias mqtt-packet's int16 writer can't encode.
     this.outboundTopicAliasMaximum = Number.isInteger(opts.outboundTopicAliasMaximum) && opts.outboundTopicAliasMaximum > 0
-      ? opts.outboundTopicAliasMaximum
+      ? Math.min(opts.outboundTopicAliasMaximum, 65535)
       : 0
     this.maximumPacketSize = opts.maximumPacketSize
     this.receiveMaximum = opts.receiveMaximum

@@ -373,14 +373,29 @@ def main():
     # must turn the check red, not merely lower the percentage. (The broad set of
     # not-yet-implemented features stays a work-in-progress denominator.) A stale
     # gap list — an unexpected pass — fails too.
-    regressions = [(r["label"], t["name"], t["status"])
-                   for r in reports for t in r["results"]
-                   if t["name"] in EXPECTED_PASSES.get(r["protocol"], set())
-                   and t["status"] != "pass"]
+    #
+    # Membership isn't enough: an EXPECTED_PASSES test that VANISHES from the results
+    # (a Paho rename on a PAHO_REF bump, a load failure) would leave `regressions`
+    # empty and the job green — silently dropping the one hard gate. So also fail
+    # when an expected-pass name never appeared in the evaluated set, and when a name
+    # is simultaneously listed as a gap/harness-limited (the README requires exactly
+    # one list; nothing else enforces it).
+    regressions = []
+    for r in reports:
+        proto = r["protocol"]
+        evaluated = {t["name"] for t in r["results"]}
+        for t in r["results"]:
+            if t["name"] in EXPECTED_PASSES.get(proto, set()) and t["status"] != "pass":
+                regressions.append((r["label"], t["name"], t["status"]))
+        for name in EXPECTED_PASSES.get(proto, set()):
+            if name not in evaluated:
+                regressions.append((r["label"], name, "absent"))
+            if name in EXPECTED_GAPS.get(proto, {}) or name in HARNESS_LIMITED.get(proto, {}):
+                regressions.append((r["label"], name, "also-in-gaps/harness-limited"))
     if regressions:
         listed = ", ".join(f"{name} [{status}] ({label})"
                            for label, name, status in regressions)
-        print(f"REGRESSION (expected-pass test failed): {listed}", file=sys.stderr)
+        print(f"REGRESSION (expected-pass gate): {listed}", file=sys.stderr)
     if regressions or xpass:
         sys.exit(1)
 

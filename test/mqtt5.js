@@ -262,8 +262,8 @@ test('MQTT 5.0 outbound Topic Alias: a caller-supplied topicAlias is stripped, n
   t.assert.equal(publishes[1].properties?.topicAlias, 1, 'reuses broker alias 1 (empty topic), caller value ignored')
 })
 
-test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full topic', async (t) => {
-  t.plan(3)
+test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full topic, and cached aliases still resolve', async (t) => {
+  t.plan(4)
   const { connect } = await createServerAndConnect(t, { brokerOptions: { outboundTopicAliasMaximum: 5 } })
   const sub = connect({ clientId: 'oalias-full', properties: { topicAliasMaximum: 1 } })
   await once(sub, 'connect')
@@ -279,6 +279,14 @@ test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full t
   t.assert.equal(publishes[0].properties?.topicAlias, 1, 'first topic gets alias 1')
   t.assert.equal(publishes[1].topic, 'o/b', 'second topic sent with its full name (table full)')
   t.assert.strictEqual(publishes[1].properties?.topicAlias, undefined, 'no alias assigned once the table is full')
+  // The existing mapping must still resolve once the table is full — re-publish the
+  // cached topic and confirm it reuses alias 1 (empty topic), not a fresh full topic.
+  await pub.publishAsync('o/a', '3')
+  await waitFor(() => publishes.length >= 3, 'third delivery')
+  t.assert.deepEqual(
+    { topic: publishes[2].topic, alias: publishes[2].properties?.topicAlias },
+    { topic: '', alias: 1 },
+    'a cached topic still reuses its alias after the table filled')
 })
 
 test('MQTT 5.0 outbound Topic Alias: a client advertising above the broker cap is clamped to it', async (t) => {
@@ -320,7 +328,7 @@ test('MQTT 5.0 outbound Topic Alias: outboundTopicAliasMaximum 0 disables outbou
 })
 
 test('MQTT 5.0 outbound Topic Alias: aliasing an outbound QoS 1 PUBLISH does not poison the stored packet', async (t) => {
-  t.plan(3)
+  t.plan(4)
   // write.js SPREADS (shallow-clones) rather than mutating. aedes-packet
   // reference-shares the `properties` object between the delivered QoSPacket and
   // the persistence-stored packet, so setting `properties.topicAlias` in place on
@@ -329,7 +337,7 @@ test('MQTT 5.0 outbound Topic Alias: aliasing an outbound QoS 1 PUBLISH does not
   // Topic Alias Maximum (aliasing off), and assert the resent PUBLISH carries no
   // topicAlias — an in-place mutation would resend a stale alias the reconnected
   // client never agreed to (a Protocol Error). The publisher sends a User Property
-  // so the shared `properties` object exists. §3.3.2-11 / write.js:19-21.
+  // so the shared `properties` object exists. §3.3.2.3.4 / see withOutboundTopicAlias.
   const { broker, port, connect } = await createServerAndConnect(t, { brokerOptions: { outboundTopicAliasMaximum: 5 } })
   const connectSub = (advertiseAlias) => generate({
     cmd: 'connect',
@@ -392,6 +400,10 @@ test('MQTT 5.0 outbound Topic Alias: aliasing an outbound QoS 1 PUBLISH does not
   await waitFor(() => rx2.some(p => p.cmd === 'publish' && p.payload.toString() === 'two'), 'un-acked message resent')
   const resent = rx2.find(p => p.cmd === 'publish' && p.payload.toString() === 'two')
   t.assert.strictEqual(resent.properties?.topicAlias, undefined, 'resent PUBLISH carries no stale Topic Alias (stored packet not poisoned)')
+  // The topic half of the clone claim: an in-place `packet.topic = ''` mutation would
+  // resend a zero-length topic here (mqtt-packet doesn't reject it), so assert the
+  // real topic survived too.
+  t.assert.equal(resent.topic, 'o/q1', 'resent PUBLISH carries the real topic (not an empty-topic mutation)')
 })
 
 test('MQTT 5.0 outbound Topic Alias: fanout assigns distinct per-subscriber aliases; v3/v4 subscribers get none', async (t) => {
@@ -1437,6 +1449,33 @@ test('MQTT 5.0 publish with an out-of-range topic alias is rejected with DISCONN
   t.assert.equal(err.message, 'topic alias 99 is out of range (broker topicAliasMaximum is 5)')
   const [packet] = await disc
   t.assert.equal(packet.reasonCode, 0x94, '0x94 Topic Alias invalid on the wire')
+})
+
+test('MQTT 5.0 publish with a non-integer (duplicated) topic alias is rejected, not stored', async (t) => {
+  t.plan(2)
+  // A duplicated Topic Alias property decodes to an array; `[1,2] < 1` / `> max` are
+  // both false via NaN, so without the Number.isInteger gate it would pass the range
+  // check and .set() a fresh array key per PUBLISH — an unbounded inbound-map DoS
+  // that bypasses topicAliasMaximum. The broker must reject it with 0x94.
+  const { broker, connect } = await createServerAndConnect(t, {
+    brokerOptions: { topicAliasMaximum: 5 }
+  })
+  const client = connect({ clientId: 'alias-nonint', reconnectPeriod: 0 })
+  await once(client, 'connect')
+  const brokerClient = broker.clients['alias-nonint']
+  const sizeBefore = brokerClient._inboundTopicAliases.size
+
+  const clientError = once(broker, 'clientError')
+  const disc = once(client, 'disconnect')
+  client.stream.write(generate(
+    { cmd: 'publish', topic: 'x', payload: 'p', qos: 0, properties: { topicAlias: [1, 2] } },
+    { protocolVersion: 5 }
+  ))
+
+  const [packet] = await disc
+  await clientError
+  t.assert.equal(packet.reasonCode, 0x94, 'non-integer topic alias rejected with 0x94')
+  t.assert.equal(brokerClient._inboundTopicAliases.size, sizeBefore, 'the inbound alias map did not grow')
 })
 
 test('MQTT 5.0 publish with an unknown topic alias is rejected with DISCONNECT 0x94', async (t) => {

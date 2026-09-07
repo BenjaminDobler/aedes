@@ -56,8 +56,8 @@ handled specially:
   failures; they are only annotated with the reason so the table is readable.
   Because v5 is a work in progress, the harness also detects the reverse: when an
   `EXPECTED_GAPS` test starts **passing** (the feature got implemented), the report
-  highlights it with a 🎉 banner and the workflow emits a CI warning, prompting you
-  to remove the now-stale entry from `EXPECTED_GAPS`.
+  highlights it with a 🎉 banner and the run **fails the build** (`run_compat.py`
+  exits non-zero), prompting you to remove the now-stale entry from `EXPECTED_GAPS`.
 - **Expected passes** (`EXPECTED_PASSES`) — the CI hard gate. Features aedes *does*
   implement whose Paho case is their only automated interop evidence (currently
   `test_server_topic_alias`, moved here out of `EXPECTED_GAPS` when broker-assigned
