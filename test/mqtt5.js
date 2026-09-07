@@ -1850,14 +1850,20 @@ test('MQTT 5.0 enhanced authentication: a non-AUTH packet mid-exchange is not pr
   t.assert.notEqual(authorizedAtPublish, false, 'a mid-exchange PUBLISH is never processed while unauthorized')
 })
 
-test('MQTT 5.0 enhanced authentication: a CONNECT+AUTH pipelined in one segment completes', async (t) => {
+test('MQTT 5.0 enhanced authentication: a pre-played AUTH (pipelined before the challenge) does not burn a round', async (t) => {
   t.plan(2)
-  // Race guard: AUTH arriving synchronously after CONNECT (before the deferred
-  // init sets _enhancedAuth) must be parked and picked up, not dispatched into a
-  // spurious close.
+  // [Blocker] A continuation AUTH is only valid AFTER the client sees the challenge.
+  // A client that pipelines CONNECT + AUTH(s) in one segment must not have those
+  // pre-plays consumed as round responses — otherwise a single ~30-byte segment
+  // burns every maxAuthRounds hook call at zero RTT. The pre-play is dropped; the
+  // exchange stalls waiting for a real (post-challenge) response and is rejected on
+  // the short deadline. The hook is invoked once (the CONNECT's round), not twice.
+  let hookCalls = 0
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
+      connectTimeout: 200, // short so the stall rejects quickly
       authenticateEnhanced (client, method, data, cb) {
+        hookCalls++
         if (data?.toString() === 'client-first') cb(null, { done: false, data: Buffer.from('server-challenge') })
         else cb(null, { done: true, data: Buffer.from('server-final') })
       }
@@ -1871,7 +1877,7 @@ test('MQTT 5.0 enhanced authentication: a CONNECT+AUTH pipelined in one segment 
   const received = []
   parser.on('packet', (p) => received.push(p))
   raw.on('data', d => parser.parse(d))
-  // CONNECT and the client's continuation AUTH in a SINGLE write (one TCP segment).
+  // CONNECT and a pre-played continuation AUTH in a SINGLE write (one TCP segment).
   const connect = generate({
     cmd: 'connect',
     protocolVersion: 5,
@@ -1884,9 +1890,79 @@ test('MQTT 5.0 enhanced authentication: a CONNECT+AUTH pipelined in one segment 
   raw.write(Buffer.concat([connect, auth]))
 
   while (!received.some(p => p.cmd === 'connack')) await delay(5)
-  const connack = received.find(p => p.cmd === 'connack')
-  t.assert.equal(connack.reasonCode, 0, 'pipelined CONNECT+AUTH completes the exchange')
-  t.assert.equal(connack.properties?.authenticationData?.toString(), 'server-final', 'final data on the CONNACK')
+  t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0x87, 'stalls and is rejected — the pre-play was not accepted as the response')
+  t.assert.equal(hookCalls, 1, 'the hook ran once (the CONNECT round), not for the pre-played AUTH')
+})
+
+test('MQTT 5.0 enhanced authentication: a CONNECT + stray AUTH in one segment still sends the success CONNACK', async (t) => {
+  t.plan(2)
+  // [Blocker] With a one-round accept, a stray AUTH pipelined in the CONNECT segment
+  // sits queued. The success drain must NOT route it into handleAuth's no-exchange
+  // branch (which would destroy the socket, so the exchange completes with NO CONNACK
+  // and `connecting` stuck true) — the queued AUTH is dropped and the CONNACK is sent.
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) } // accept on round 1
+    }
+  })
+  const ready = once(broker, 'clientReady')
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  const connect = generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-stray',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('x') }
+  }, { protocolVersion: 5 })
+  const stray = generate({ cmd: 'auth', reasonCode: 0x18, properties: { authenticationMethod: 'SCRAM-SHA-256', authenticationData: Buffer.from('stray') } }, { protocolVersion: 5 })
+  raw.write(Buffer.concat([connect, stray]))
+
+  const [readyClient] = await ready
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(received.find(p => p.cmd === 'connack').reasonCode, 0, 'success CONNACK is sent (not a bare close)')
+  // And the stray AUTH did not disconnect the now-connected client.
+  await delay(30)
+  t.assert.equal(broker.clients[readyClient.id] !== undefined, true, 'client stays connected (stray AUTH dropped, not a Protocol Error disconnect)')
+})
+
+test('MQTT 5.0 enhanced authentication: a hook returning non-Buffer data is rejected, not a process crash', async (t) => {
+  t.plan(2)
+  // [Blocker] A non-Buffer result.data (Uint8Array from crypto.subtle, null, a
+  // number) would reach mqtt-packet and throw — uncaught on the CONNACK size probe
+  // (process exit), the client choosing via maximumPacketSize. Validate at the
+  // boundary: reject with a clientError, never serialize it.
+  const brokerErrors = []
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true, data: new Uint8Array([1, 2, 3]) }) }
+    }
+  })
+  broker.on('clientError', (c, e) => { brokerErrors.push(e.message) })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-baddata',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', maximumPacketSize: 50 }
+  }, { protocolVersion: 5 }))
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.ok(received.find(p => p.cmd === 'connack').reasonCode >= 0x80, 'rejected (no crash, no success)')
+  t.assert.ok(brokerErrors.some(m => /must be a Buffer/.test(m)), 'clientError explains the broken hook')
 })
 
 test('MQTT 5.0 enhanced authentication: a socket drop while the hook is pending is handled cleanly', async (t) => {
@@ -2706,6 +2782,36 @@ test('MQTT 5.0 enhanced authentication: a hook can redirect with a Server Refere
   const clampConnack = await drive('ea-badredirect')
   t.assert.equal(clampConnack.reasonCode, 0x87, 'a 0x9C with no serverReference is clamped to 0x87')
   t.assert.strictEqual(clampConnack.properties?.serverReference, undefined, 'and carries no Server Reference')
+})
+
+test('MQTT 5.0 enhanced authentication: a challenge that cannot fit the client Maximum Packet Size is rejected, not sent oversize', async (t) => {
+  t.plan(1)
+  // [MQTT-3.1.2-24] A challenge whose mandatory method + data exceed the client's
+  // Maximum Packet Size cannot be sent within the limit. aedes measures the AUTH
+  // exactly (not via mqtt-packet's header-undercounting helper) and fails the
+  // exchange rather than emitting an oversize AUTH the client answers with 0x95.
+  const { port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) { cb(null, { done: false, data: Buffer.alloc(40, 0x41) }) }
+    }
+  })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-bigchallenge',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256', maximumPacketSize: 50 } // 40B data + method > 50
+  }, { protocolVersion: 5 }))
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.equal(received.some(p => p.cmd === 'auth'), false, 'no oversize AUTH emitted; the exchange was rejected instead')
 })
 
 test('MQTT 5.0 enhanced authentication: a large final Authentication Data is dropped from the CONNACK to fit Maximum Packet Size', async (t) => {

@@ -413,7 +413,7 @@ __MQTT 5.0 only__ ([§4.12 Enhanced Authentication](https://docs.oasis-open.org/
 
 By default `authenticateEnhanced` is `null` (unset): a `CONNECT` that asks for enhanced authentication is rejected with reason code `0x8C` (Bad authentication method). Set the handler to enable it.
 
-> __⚠️ Mutual exclusion with [`authenticate`](#handler-authenticate-client-username-password-callback):__ these two hooks do not chain. A `CONNECT` carrying an Authentication Method runs `authenticateEnhanced` __instead of__ `authenticate` — the username/password hook is __not__ called for that client. If your `authenticate` hook does more than check credentials (allow-lists, per-IP counters, setting `client.user`), replicate that logic inside `authenticateEnhanced`, or it is silently skipped for any client that requests enhanced authentication.
+> __Hook order with [`authenticate`](#handler-authenticate-client-username-password-callback):__ the two hooks __chain__. For a `CONNECT` carrying an Authentication Method the order is `preConnect` → `authenticateEnhanced` (the AUTH exchange) → __`authenticate`__ → CONNACK: once the exchange succeeds, the standard username/password hook runs too, with `packet.username` / `packet.password` still passed. So policy that lives in `authenticate` (allow-lists, per-IP counters, setting `client.user`) applies to enhanced-auth clients without duplication — do __not__ replicate it inside `authenticateEnhanced`. Either hook rejecting rejects the connection; `authenticate` still sets `client._authorized`, so `authorizePublish` / `authorizeSubscribe` see the same state as a username/password client.
 
 Each round, return:
 
