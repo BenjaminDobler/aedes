@@ -392,10 +392,25 @@ def main():
                 regressions.append((r["label"], name, "absent"))
             if name in EXPECTED_GAPS.get(proto, {}) or name in HARNESS_LIMITED.get(proto, {}):
                 regressions.append((r["label"], name, "also-in-gaps/harness-limited"))
+    # A whole PROTOCOL can vanish too: the loops above only visit protocols that
+    # produced a report, so a protocol that carries EXPECTED_PASSES gates but never
+    # ran (a `--protocols` subset, a run_protocol crash) has every one of its gates
+    # checked zero times and the job stays green. Diff the gated protocols against the
+    # ones actually present and fail on any that are missing entirely.
+    present_protocols = {r["protocol"] for r in reports}
+    for proto in EXPECTED_PASSES:
+        if proto not in present_protocols:
+            regressions.append((proto, "<all expected-pass tests>", "protocol-absent"))
     if regressions:
         listed = ", ".join(f"{name} [{status}] ({label})"
                            for label, name, status in regressions)
         print(f"REGRESSION (expected-pass gate): {listed}", file=sys.stderr)
+        # Surface it as a GitHub Actions error annotation too, matching the
+        # unexpected-pass step in .github/workflows/mqtt-compat.yml — a plain stderr
+        # line renders in the log as an indistinguishable failure marker, so an
+        # operator can't tell a hard-gated regression from an ordinary WIP gap
+        # without digging. (No-op prefix in a plain terminal.)
+        print(f"::error title=MQTT compat: expected-pass regression::{listed}")
     if regressions or xpass:
         sys.exit(1)
 

@@ -160,6 +160,12 @@ expectType<Aedes>(
   )
 )
 expectType<Aedes>(
+  broker.on(
+    'outboundTopicAliasExhausted',
+    (client: Client, info: { max: number }) => {}
+  )
+)
+expectType<Aedes>(
   broker.on('willDropped', (client: Client, will: NonNullable<ConnectPacket['will']>) => {})
 )
 

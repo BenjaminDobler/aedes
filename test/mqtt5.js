@@ -320,6 +320,37 @@ test('MQTT 5.0 outbound Topic Alias: a full alias table falls back to the full t
     'a cached topic still reuses its alias after the table filled')
 })
 
+test('MQTT 5.0 outbound Topic Alias: table exhaustion emits outboundTopicAliasExhausted once per connection', async (t) => {
+  t.plan(3)
+  // Silent degradation is the risk: once the per-connection table fills, further
+  // distinct topics quietly revert to full-topic PUBLISHes. Emit a one-shot event so
+  // an operator can spot an outboundTopicAliasMaximum set too low. Effective max here
+  // is min(client 1, broker 5) = 1.
+  const { broker, connect } = await createServerAndConnect(t, { brokerOptions: { outboundTopicAliasMaximum: 5 } })
+  const events = []
+  broker.on('outboundTopicAliasExhausted', (client, info) => events.push({ id: client.id, info }))
+  const sub = connect({ clientId: 'oalias-exhaust', properties: { topicAliasMaximum: 1 } })
+  await once(sub, 'connect')
+  const publishes = []
+  sub.on('packetreceive', p => { if (p.cmd === 'publish') publishes.push(p) })
+  await sub.subscribeAsync('e/#', { qos: 0 })
+  const pub = connect({ clientId: 'oalias-exhaust-pub' })
+  await once(pub, 'connect')
+  await pub.publishAsync('e/a', '1') // fills the single slot (alias 1)
+  await waitFor(() => publishes.length >= 1, 'first delivery')
+  t.assert.equal(events.length, 0, 'not emitted while the table still has room')
+  await pub.publishAsync('e/b', '2') // new topic, table full -> exhausted
+  await pub.publishAsync('e/c', '3') // another new topic -> must NOT re-emit (latched)
+  await waitFor(() => publishes.length >= 3, 'later deliveries')
+  await delay(20)
+  t.assert.deepEqual(events, [{ id: 'oalias-exhaust', info: { max: 1 } }], 'emitted exactly once, carrying the effective max')
+  // A cached topic re-publish after exhaustion must not emit again either.
+  await pub.publishAsync('e/a', '4')
+  await waitFor(() => publishes.length >= 4, 'cached re-delivery')
+  await delay(20)
+  t.assert.equal(events.length, 1, 'still exactly one event (reusing a cached alias does not re-trip)')
+})
+
 test('MQTT 5.0 outbound Topic Alias: a client advertising above the broker cap is clamped to it', async (t) => {
   t.plan(2)
   // The broker option bounds the effective max even when the client advertises far
