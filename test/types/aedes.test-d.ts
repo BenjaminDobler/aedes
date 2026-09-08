@@ -72,9 +72,9 @@ const broker = new Aedes({
       error.reasonCode = 0x8c
       done(error)
     } else if (data?.toString() === 'client-final') {
-      done(null, { done: true, data: Buffer.from('server-final') })
+      done(null, { status: 'accept', data: Buffer.from('server-final') })
     } else {
-      done(null, { done: false, data: Buffer.from('server-challenge'), properties: { reasonString: 'continue' } })
+      done(null, { status: 'challenge', data: Buffer.from('server-challenge'), properties: { reasonString: 'continue' } })
     }
   },
   authorizePublish: (
@@ -281,11 +281,12 @@ expectType<void>(
 )
 
 // [#833] EnhancedAuthResult shape checks: a well-formed result is assignable...
-expectAssignable<EnhancedAuthResult>({ done: true })
-expectAssignable<EnhancedAuthResult>({ done: false, data: Buffer.from('x'), properties: { reasonString: 'go' } })
+expectAssignable<EnhancedAuthResult>({ status: 'accept' })
+expectAssignable<EnhancedAuthResult>({ status: 'challenge', data: Buffer.from('x'), properties: { reasonString: 'go' } })
 // ...but malformed ones are rejected.
-expectError<EnhancedAuthResult>({ done: 'yes' }) // done must be boolean
-expectError<EnhancedAuthResult>({ done: true, data: 'not-a-buffer' }) // data must be a Buffer
+expectError<EnhancedAuthResult>({ status: 'yes' }) // status must be 'accept' | 'challenge'
+expectError<EnhancedAuthResult>({ status: 'accept', data: 'not-a-buffer' }) // data must be a Buffer
+expectError<EnhancedAuthResult>({ data: Buffer.from('x') }) // status is required (discriminator)
 // AUTH allows only Reason String / User Property — Authentication Method / Data
 // are owned by aedes and not accepted on the hook result properties.
-expectError<EnhancedAuthResult>({ done: false, properties: { authenticationMethod: 'X' } })
+expectError<EnhancedAuthResult>({ status: 'challenge', properties: { authenticationMethod: 'X' } })

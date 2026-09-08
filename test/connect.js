@@ -519,7 +519,7 @@ test('[#833] an enhanced-auth step short-circuits when the client is already clo
   const broker = await Aedes.createBroker({
     authenticateEnhanced (client, method, data, cb) {
       hookCalled = true
-      cb(null, { done: true })
+      cb(null, { status: 'accept' })
     }
   })
   t.after(() => broker.close())
@@ -569,7 +569,7 @@ test('[#833] a socket close in the setImmediate(init) window arms no enhanced-au
   const broker = await Aedes.createBroker({
     authenticateEnhanced (client, method, data, cb) {
       hookCalled = true
-      cb(null, { done: true })
+      cb(null, { status: 'accept' })
     }
   })
   t.after(() => broker.close())

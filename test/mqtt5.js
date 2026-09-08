@@ -1637,7 +1637,7 @@ test('MQTT 5.0 enhanced authentication: the standard authenticate hook is chaine
   let authCalled = false
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) },
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept' }) },
       authenticate (client, username, password, cb) { authCalled = true; client.user = 'chained'; cb(null, true) }
     }
   })
@@ -1670,7 +1670,7 @@ test('MQTT 5.0 enhanced authentication: a rejecting chained authenticate hook re
   // rejects with the standard 0x87 CONNACK path.
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) },
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept' }) },
       authenticate (client, username, password, cb) {
         const err = new Error('denied by policy')
         err.returnCode = 5
@@ -1706,9 +1706,9 @@ test('MQTT 5.0 enhanced authentication: a two-round AUTH exchange completes the 
       authenticateEnhanced (client, method, data, cb) {
         rounds.push(data?.toString())
         if (data?.toString() === 'client-first') {
-          cb(null, { done: false, data: Buffer.from('server-challenge') }) // challenge
+          cb(null, { status: 'challenge', data: Buffer.from('server-challenge') }) // challenge
         } else if (data?.toString() === 'client-final') {
-          cb(null, { done: true, data: Buffer.from('server-final') }) // accept
+          cb(null, { status: 'accept', data: Buffer.from('server-final') }) // accept
         } else {
           cb(new Error('unexpected auth data'))
         }
@@ -1755,14 +1755,14 @@ test('MQTT 5.0 enhanced authentication: a two-round AUTH exchange completes the 
   t.assert.deepEqual(rounds, ['client-first', 'client-final'], 'the hook was called once per round')
 })
 
-test('MQTT 5.0 enhanced authentication: a single-round { done: true } straight from CONNECT (no challenge, no data)', async (t) => {
+test('MQTT 5.0 enhanced authentication: a single-round accept straight from CONNECT (no challenge, no data)', async (t) => {
   t.plan(7)
   let hookData = 'unset'
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
         hookData = data // CONNECT carried no authenticationData → undefined
-        cb(null, { done: true }) // accept immediately, no challenge, no final data
+        cb(null, { status: 'accept' }) // accept immediately, no challenge, no final data
       }
     }
   })
@@ -1812,8 +1812,8 @@ test('MQTT 5.0 enhanced authentication: a non-AUTH packet mid-exchange is not pr
         cb(null)
       },
       authenticateEnhanced (client, method, data, cb) {
-        if (data?.toString() === 'client-first') cb(null, { done: false, data: Buffer.from('server-challenge') })
-        else cb(null, { done: true })
+        if (data?.toString() === 'client-first') cb(null, { status: 'challenge', data: Buffer.from('server-challenge') })
+        else cb(null, { status: 'accept' })
       }
     }
   })
@@ -1864,8 +1864,8 @@ test('MQTT 5.0 enhanced authentication: a pre-played AUTH (pipelined before the 
       connectTimeout: 200, // short so the stall rejects quickly
       authenticateEnhanced (client, method, data, cb) {
         hookCalls++
-        if (data?.toString() === 'client-first') cb(null, { done: false, data: Buffer.from('server-challenge') })
-        else cb(null, { done: true, data: Buffer.from('server-final') })
+        if (data?.toString() === 'client-first') cb(null, { status: 'challenge', data: Buffer.from('server-challenge') })
+        else cb(null, { status: 'accept', data: Buffer.from('server-final') })
       }
     }
   })
@@ -1902,7 +1902,7 @@ test('MQTT 5.0 enhanced authentication: a CONNECT + stray AUTH in one segment st
   // and `connecting` stuck true) — the queued AUTH is dropped and the CONNACK is sent.
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) } // accept on round 1
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept' }) } // accept on round 1
     }
   })
   const ready = once(broker, 'clientReady')
@@ -1941,7 +1941,7 @@ test('MQTT 5.0 enhanced authentication: a hook returning non-Buffer data is reje
   const brokerErrors = []
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true, data: new Uint8Array([1, 2, 3]) }) }
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept', data: new Uint8Array([1, 2, 3]) }) }
     }
   })
   broker.on('clientError', (c, e) => { brokerErrors.push(e.message) })
@@ -1965,6 +1965,39 @@ test('MQTT 5.0 enhanced authentication: a hook returning non-Buffer data is reje
   t.assert.ok(brokerErrors.some(m => /must be a Buffer/.test(m)), 'clientError explains the broken hook')
 })
 
+test('MQTT 5.0 enhanced authentication: a result with an invalid status fails closed (guards the legacy { done } shape)', async (t) => {
+  t.plan(2)
+  // `status` is the discriminator: anything other than 'accept' / 'challenge' — a
+  // typo, or a hook still returning the pre-release `{ done: true }` shape — must be
+  // rejected, never guessed into an accept or a challenge loop. Pin that a stale
+  // `{ done: true }` gets a failing CONNACK plus a clientError, not a silent accept.
+  const brokerErrors = []
+  const { broker, port } = await createServerAndConnect(t, {
+    brokerOptions: {
+      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) } // legacy shape, no `status`
+    }
+  })
+  broker.on('clientError', (c, e) => { brokerErrors.push(e.message) })
+  const raw = createConnection(port, 'localhost')
+  t.after(() => raw.destroy())
+  raw.on('error', () => {})
+  const parser = createParser({ protocolVersion: 5 })
+  const received = []
+  parser.on('packet', (p) => received.push(p))
+  raw.on('data', d => parser.parse(d))
+  raw.write(generate({
+    cmd: 'connect',
+    protocolVersion: 5,
+    clientId: 'ea-badstatus',
+    clean: true,
+    keepalive: 0,
+    properties: { authenticationMethod: 'SCRAM-SHA-256' }
+  }, { protocolVersion: 5 }))
+  while (!received.some(p => p.cmd === 'connack')) await delay(5)
+  t.assert.ok(received.find(p => p.cmd === 'connack').reasonCode >= 0x80, 'rejected (no silent accept)')
+  t.assert.ok(brokerErrors.some(m => /status must be/.test(m)), 'clientError names the invalid status')
+})
+
 test('MQTT 5.0 enhanced authentication: a socket drop while the hook is pending is handled cleanly', async (t) => {
   t.plan(1)
   let release
@@ -1973,7 +2006,7 @@ test('MQTT 5.0 enhanced authentication: a socket drop while the hook is pending 
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        release = () => cb(null, { done: true }) // hold the callback
+        release = () => cb(null, { status: 'accept' }) // hold the callback
         onHookCalled()
       }
     }
@@ -2004,7 +2037,7 @@ test('MQTT 5.0 enhanced authentication: a hook that calls back twice is latched 
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: true, data: Buffer.from('server-final') })
+        cb(null, { status: 'accept', data: Buffer.from('server-final') })
         cb(new Error('second call must be ignored')) // latched out
       }
     }
@@ -2040,7 +2073,7 @@ test('MQTT 5.0 enhanced authentication: an exchange that never settles is capped
       maxAuthRounds: 3,
       authenticateEnhanced (client, method, data, cb) {
         hookCalls++
-        cb(null, { done: false, data: Buffer.from('again') }) // never accept
+        cb(null, { status: 'challenge', data: Buffer.from('again') }) // never accept
       }
     }
   })
@@ -2087,7 +2120,7 @@ test('MQTT 5.0 enhanced authentication: a hook that challenges once then rejects
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        if (++round === 1) cb(null, { done: false, data: Buffer.from('server-challenge') })
+        if (++round === 1) cb(null, { status: 'challenge', data: Buffer.from('server-challenge') })
         else cb(Object.assign(new Error('bad final proof'), { reasonCode: 0x87, reasonString: 'bad final proof' }))
       }
     }
@@ -2200,7 +2233,7 @@ test('MQTT 5.0 enhanced authentication: a DISCONNECT during the exchange aborts 
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: false, data: Buffer.from('server-challenge') }) // challenge, then wait
+        cb(null, { status: 'challenge', data: Buffer.from('server-challenge') }) // challenge, then wait
       }
     }
   })
@@ -2240,7 +2273,7 @@ test('MQTT 5.0 enhanced authentication: a CONNECT+DISCONNECT pipelined in one se
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: false, data: Buffer.from('server-challenge') })
+        cb(null, { status: 'challenge', data: Buffer.from('server-challenge') })
       }
     }
   })
@@ -2281,7 +2314,7 @@ test('MQTT 5.0 enhanced authentication: a DISCONNECT while the hook is pending d
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        release = () => cb(null, { done: true }) // hold until we've sent DISCONNECT
+        release = () => cb(null, { status: 'accept' }) // hold until we've sent DISCONNECT
         onHookPending()
       }
     }
@@ -2334,7 +2367,7 @@ test('MQTT 5.0 enhanced authentication: a pipelined CONNECT+DISCONNECT with a on
   // than register the client (evicting the live 'ea-q-victim') and CONNACK 0x00.
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) } // accept round 1
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept' }) } // accept round 1
     }
   })
 
@@ -2432,7 +2465,7 @@ test('MQTT 5.0 enhanced authentication: changing the Authentication Method mid-e
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: false, data: Buffer.from('server-challenge') }) // always challenge
+        cb(null, { status: 'challenge', data: Buffer.from('server-challenge') }) // always challenge
       }
     }
   })
@@ -2470,9 +2503,9 @@ test('MQTT 5.0 enhanced authentication: hook Reason String + User Property ride 
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
         if (data?.toString() === 'client-first') {
-          cb(null, { done: false, data: Buffer.from('server-challenge'), properties: { reasonString: 'continue please', userProperties: { step: '1' } } })
+          cb(null, { status: 'challenge', data: Buffer.from('server-challenge'), properties: { reasonString: 'continue please', userProperties: { step: '1' } } })
         } else {
-          cb(null, { done: true })
+          cb(null, { status: 'accept' })
         }
       }
     }
@@ -2517,9 +2550,9 @@ test('MQTT 5.0 enhanced authentication: hook result properties are dropped when 
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
         if (data?.toString() === 'client-first') {
-          cb(null, { done: false, data: Buffer.from('server-challenge'), properties: { reasonString: 'nope', serverReference: 'other:1883' } })
+          cb(null, { status: 'challenge', data: Buffer.from('server-challenge'), properties: { reasonString: 'nope', serverReference: 'other:1883' } })
         } else {
-          cb(null, { done: true })
+          cb(null, { status: 'accept' })
         }
       }
     }
@@ -2557,7 +2590,7 @@ test('MQTT 5.0 enhanced authentication: a duplicated Authentication Method is a 
   // not forwarded to the hook as method: string[]. §3.1.2.11.9.
   let hookCalls = 0
   const { port } = await createServerAndConnect(t, {
-    brokerOptions: { authenticateEnhanced (client, method, data, cb) { hookCalls++; cb(null, { done: true }) } }
+    brokerOptions: { authenticateEnhanced (client, method, data, cb) { hookCalls++; cb(null, { status: 'accept' }) } }
   })
   const raw = createConnection(port, 'localhost')
   t.after(() => raw.destroy())
@@ -2589,7 +2622,7 @@ test('MQTT 5.0 enhanced authentication: a duplicated Authentication Data on a co
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
         datas.push(data)
-        cb(null, { done: false, data: Buffer.from('challenge') }) // challenge, await reply
+        cb(null, { status: 'challenge', data: Buffer.from('challenge') }) // challenge, await reply
       }
     }
   })
@@ -2661,7 +2694,7 @@ test('MQTT 5.0 enhanced authentication: an empty-string Authentication Method re
   let seenMethod
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { seenMethod = method; cb(null, { done: true }) }
+      authenticateEnhanced (client, method, data, cb) { seenMethod = method; cb(null, { status: 'accept' }) }
     }
   })
   const raw = createConnection(port, 'localhost')
@@ -2714,7 +2747,7 @@ test('MQTT 5.0 enhanced authentication: a non-function authenticateEnhanced is t
 test('MQTT 5.0 enhanced authentication: a hook that calls back with no result fails closed (not a challenge loop)', async (t) => {
   t.plan(1)
   // cb() / cb(null) / cb(null, null) must REJECT, not fall through to "send another
-  // challenge" — the fail-open trap. Only an explicit { done: false } continues.
+  // challenge" — the fail-open trap. Only an explicit { status: 'challenge' } continues.
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) { cb(null) } // no result
@@ -2792,7 +2825,7 @@ test('MQTT 5.0 enhanced authentication: a challenge that cannot fit the client M
   // exchange rather than emitting an oversize AUTH the client answers with 0x95.
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: false, data: Buffer.alloc(40, 0x41) }) }
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'challenge', data: Buffer.alloc(40, 0x41) }) }
     }
   })
   const raw = createConnection(port, 'localhost')
@@ -2822,7 +2855,7 @@ test('MQTT 5.0 enhanced authentication: a large final Authentication Data is dro
   // are kept.
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: true, data: Buffer.alloc(200, 0x41) }) }
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept', data: Buffer.alloc(200, 0x41) }) }
     }
   })
   const raw = createConnection(port, 'localhost')
@@ -2853,7 +2886,7 @@ test('MQTT 5.0 enhanced authentication: a continuation AUTH omitting the method 
   // a *different* method is 0x8C.
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
-      authenticateEnhanced (client, method, data, cb) { cb(null, { done: false, data: Buffer.from('challenge') }) }
+      authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'challenge', data: Buffer.from('challenge') }) }
     }
   })
   const raw = createConnection(port, 'localhost')
@@ -2887,7 +2920,7 @@ test('MQTT 5.0 enhanced authentication: an exchange started while the broker is 
   // not hang with no timer/CONNACK. Force it with a preConnect that closes the broker.
   const broker = await Aedes.createBroker({
     preConnect (client, packet, done) { broker.close(); done(null, true) },
-    authenticateEnhanced (client, method, data, cb) { cb(null, { done: true }) }
+    authenticateEnhanced (client, method, data, cb) { cb(null, { status: 'accept' }) }
   })
   const server = createServer((conn) => broker.handle(conn))
   await new Promise(resolve => server.listen(0, resolve))
@@ -2918,7 +2951,7 @@ test('MQTT 5.0 enhanced authentication: the broker closing while the hook is pen
   // runs; when it calls back, the exchange fails (0x88) rather than proceeding.
   let release
   const broker = await Aedes.createBroker({
-    authenticateEnhanced (client, method, data, cb) { release = () => cb(null, { done: true }); onPending() }
+    authenticateEnhanced (client, method, data, cb) { release = () => cb(null, { status: 'accept' }); onPending() }
   })
   let onPending
   const pending = new Promise(resolve => { onPending = resolve })
@@ -3046,10 +3079,10 @@ test('MQTT 5.0 enhanced authentication: a hook that continues then throws in the
       authenticateEnhanced (client, method, data, cb) {
         hookCalls++
         if (hookCalls === 1) {
-          cb(null, { done: false, data: Buffer.from('server-challenge') })
+          cb(null, { status: 'challenge', data: Buffer.from('server-challenge') })
           throw new Error('thrown after continue') // must be swallowed (clientError)
         }
-        cb(null, { done: true })
+        cb(null, { status: 'accept' })
       }
     }
   })
@@ -3147,7 +3180,7 @@ test('MQTT 5.0 enhanced authentication: a re-auth AUTH from a client that negoti
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: true }) // accept in one round
+        cb(null, { status: 'accept' }) // accept in one round
       }
     }
   })
@@ -3189,7 +3222,7 @@ test('MQTT 5.0 enhanced authentication: a connected client sending AUTH 0x18 (no
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: true })
+        cb(null, { status: 'accept' })
       }
     }
   })
@@ -3227,7 +3260,7 @@ test('MQTT 5.0 enhanced authentication: a continuation AUTH with a wrong reason 
   const { port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: false, data: Buffer.from('server-challenge') })
+        cb(null, { status: 'challenge', data: Buffer.from('server-challenge') })
       }
     }
   })
@@ -3277,7 +3310,7 @@ test('MQTT 5.0 enhanced authentication: pipelined + dribbled AUTHs never invoke 
         // Respond asynchronously so overlapping calls would actually overlap.
         setTimeout(() => {
           inflight--
-          cb(null, finish ? { done: true } : { done: false, data: Buffer.from('ch') })
+          cb(null, finish ? { status: 'accept' } : { status: 'challenge', data: Buffer.from('ch') })
         }, 20)
       }
     }
@@ -3324,7 +3357,7 @@ test('MQTT 5.0 enhanced authentication: a hook that calls back after the deadlin
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       connectTimeout: 80, // exchange deadline
-      authenticateEnhanced (client, method, data, cb) { release = () => cb(null, { done: true }); onHeld() }
+      authenticateEnhanced (client, method, data, cb) { release = () => cb(null, { status: 'accept' }); onHeld() }
     }
   })
   const errors = []
@@ -3355,7 +3388,7 @@ test('MQTT 5.0 enhanced authentication: a stalled exchange is closed after conne
     brokerOptions: {
       connectTimeout: 50,
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: false, data: Buffer.from('server-challenge') }) // challenge, then wait forever
+        cb(null, { status: 'challenge', data: Buffer.from('server-challenge') }) // challenge, then wait forever
       }
     }
   })
@@ -3393,7 +3426,7 @@ test('MQTT 5.0 enhanced authentication: a challenge that cannot fit the client M
   const { broker, port } = await createServerAndConnect(t, {
     brokerOptions: {
       authenticateEnhanced (client, method, data, cb) {
-        cb(null, { done: false, data: Buffer.alloc(64) }) // a challenge that won't fit maximumPacketSize: 8
+        cb(null, { status: 'challenge', data: Buffer.alloc(64) }) // a challenge that won't fit maximumPacketSize: 8
       }
     }
   })

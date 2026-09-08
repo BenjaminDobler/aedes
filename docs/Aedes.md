@@ -405,8 +405,8 @@ Please refer to [Connect Return Code](http://docs.oasis-open.org/mqtt/mqtt/v3.1.
 - callback: `<Function>` `(error, result) => void`
   - error `<Error>` | `null`
   - result `<object>` | `null`
-    - done `<boolean>` `true` accepts the connection; `false` sends the client another `AUTH` challenge
-    - data `<Buffer>` (optional) Authentication Data — the challenge on `done: false`, the final data (returned on the `CONNACK`) on `done: true`. Must be a `Buffer` (not a `Uint8Array`/`TypedArray`). __The final `done: true` data is best-effort:__ if the CONNACK would exceed the client's Maximum Packet Size it is dropped, so a mutual-auth mechanism must not depend on the client receiving the server-final proof — keep it small, or use a challenge round for the proof instead.
+    - status `<string>` the discriminator: `'accept'` accepts the connection; `'challenge'` sends the client another `AUTH` challenge. Any other value (or a missing `status`) fails closed as a rejection.
+    - data `<Buffer>` (optional) Authentication Data — the challenge on `status: 'challenge'`, the final data (returned on the `CONNACK`) on `status: 'accept'`. Must be a `Buffer` (not a `Uint8Array`/`TypedArray`). __The final `status: 'accept'` data is best-effort:__ if the CONNACK would exceed the client's Maximum Packet Size it is dropped, so a mutual-auth mechanism must not depend on the client receiving the server-final proof — keep it small, or use a challenge round for the proof instead.
     - properties `<object>` (optional) extra MQTT 5.0 properties for the challenge `AUTH` (e.g. `reasonString`)
 
 __MQTT 5.0 only__ ([§4.12 Enhanced Authentication](https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901256)). This handler drives a multi-round `AUTH`-packet challenge/response for a `CONNECT` that carries an Authentication Method. It is invoked once per round with the client's most recent Authentication Data.
@@ -417,8 +417,8 @@ By default `authenticateEnhanced` is `null` (unset): a `CONNECT` that asks for e
 
 Each round, return:
 
-- `callback(null, { done: false, data })` to challenge the client — the broker sends an `AUTH` with reason code `0x18` (Continue authentication) and waits for the client's next `AUTH`.
-- `callback(null, { done: true, data })` to accept — the broker resumes the connect flow and sends the `CONNACK` (any `data` becomes its Authentication Data).
+- `callback(null, { status: 'challenge', data })` to challenge the client — the broker sends an `AUTH` with reason code `0x18` (Continue authentication) and waits for the client's next `AUTH`.
+- `callback(null, { status: 'accept', data })` to accept — the broker resumes the connect flow and sends the `CONNACK` (any `data` becomes its Authentication Data).
 - `callback(error)` to reject — the broker sends a failing `CONNACK`. Set `error.reasonCode` (default `0x87` Not authorized; any code that is not a valid CONNACK Connect Reason Code — a success/`< 0x80` code, or a real reason code not in Table 3-1 such as `0x8E`/`0x93` — is clamped to `0x87`) and optionally `error.reasonString`. Set `error.serverReference` to redirect a v5 client (CONNACK `0x9C`, or `0x9D` via `error.reasonCode`), as with the [`authenticate`](#handler-authenticate-client-username-password-callback) hook.
 - `callback(null)` (or `callback(null, null)`) — a missing result is treated as a __rejection__ (`0x87`), not a challenge, so a hook that forgets its result fails closed.
 
@@ -446,12 +446,12 @@ aedes.authenticateEnhanced = function (client, method, data, callback) {
   if (client._scramExpectedFinal &&
       data?.length === client._scramExpectedFinal.length &&
       timingSafeEqual(data, client._scramExpectedFinal)) {
-    callback(null, { done: true, data: Buffer.from('server-final') })
+    callback(null, { status: 'accept', data: Buffer.from('server-final') })
   } else if (!client._scramExpectedFinal) {
     // First round: stash the expected client-final proof for the next round to
     // compare (see the preConnect-stash note above for other CONNECT fields).
     client._scramExpectedFinal = computeExpectedFinal(client, data)
-    callback(null, { done: false, data: Buffer.from('server-challenge') })
+    callback(null, { status: 'challenge', data: Buffer.from('server-challenge') })
   } else {
     const error = new Error('authentication failed') // generic; reaches the client
     error.reasonCode = 0x87

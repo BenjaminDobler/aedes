@@ -70,14 +70,14 @@ export type EnhancedAuthError = Error & { reasonCode?: ConnackReasonCode, reason
 // so they are excluded here. Subject to the client's Request Problem Information.
 export type EnhancedAuthProperties = Omit<NonNullable<IAuthPacket['properties']>, 'authenticationMethod' | 'authenticationData'>
 
-// One step of the enhanced-auth exchange. `done: false` sends the client another
-// AUTH challenge (carrying `data` / `properties`); `done: true` accepts the
-// connection (any `data` becomes the CONNACK Authentication Data).
-export interface EnhancedAuthResult {
-  done: boolean;
-  data?: Buffer;
-  properties?: EnhancedAuthProperties;
-}
+// One step of the enhanced-auth exchange, as a discriminated union on `status`.
+// `status: 'challenge'` sends the client another AUTH challenge (carrying `data` /
+// `properties`); `status: 'accept'` accepts the connection (any `data` becomes the
+// CONNACK Authentication Data). `status` is a distinct field from the `done`
+// callback in the hook signature, and TS narrows `data`/`properties` per branch.
+export type EnhancedAuthResult =
+  | { status: 'challenge'; data?: Buffer; properties?: EnhancedAuthProperties }
+  | { status: 'accept'; data?: Buffer; properties?: EnhancedAuthProperties }
 
 type PreConnectHandler = (
   client: Client,
